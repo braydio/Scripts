@@ -1,0 +1,399 @@
+=== fast-cat.sh ===
+#!/bin/bash
+
+# Aggregates files and directories into a single concatenated file named ".fastcat.txt"
+# Uses `fastcat.txt` in the current directory if available; defaults to the current directory otherwise
+# Supports exclusion of files and directories specified in `exclude.txt`
+
+# Script metadata
+SCRIPT_NAME="Fast-Cat"
+SCRIPT_VERSION="1.6.0"
+
+# Print script name and version
+echo -e "\e[34m$SCRIPT_NAME - Version $SCRIPT_VERSION\e[0m"
+echo
+
+# Colors for output
+GREEN="\e[32m"
+RED="\e[31m"
+YELLOW="\e[33m"
+RESET="\e[0m"
+
+# Default settings
+DEFAULT_DIR=$(pwd)
+CONCAT_FILE_NAME=".fastcat.txt"
+FILELIST_NAME="fastcat.txt"
+EXCLUDE_FILE="nocat.txt"
+
+# Function to display help/usage
+show_help() {
+  echo "Aggregates files and directories into a single concatenated file named .fastcat.txt"
+  echo "Uses $(fastcat.txt) in the current directory if available; defaults to all files in the current directory otherwise"
+  echo "Supports exclusion of files and directories flagged or specified in $(nocat.txt)"
+
+  echo "Usage: $0 [OPTIONS]"
+  echo ""
+  echo "Options:"
+  echo "  -h, --help          Display this help message and exit."
+  echo "  -d, --dir <dir>     Specify a target directory to process (Or list in nocat.txt)."
+  echo "  -f, --file <file>   Specify a file to be processed (Or list file in fastcat.txt)."
+  exit 0
+}
+
+# Parse arguments
+TARGET_DIRS=()
+USE_FILELIST=false
+while [[ "$#" -gt 0 ]]; do
+  case $1 in
+  -h | --help)
+    show_help
+    ;;
+  -d | --dir)
+    TARGET_DIRS+=("$2")
+    shift
+    ;;
+  -f | --file)
+    TARGET_DIRS+=("$2")
+    shift
+    ;;
+  *)
+    echo -e "${RED}Unknown argument: $1${RESET}"
+    exit 1
+    ;;
+  esac
+  shift
+done
+
+# Use `fastcat.txt` if it exists and no flags are passed
+if [ -f "$DEFAULT_DIR/$FILELIST_NAME" ] && [ ${#TARGET_DIRS[@]} -eq 0 ]; then
+  echo -e "${YELLOW}Using filelist: $FILELIST_NAME${RESET}"
+  mapfile -t TARGET_DIRS <"$DEFAULT_DIR/$FILELIST_NAME"
+  USE_FILELIST=true
+fi
+
+# Default to current directory if no filelist and no flags
+if [ ${#TARGET_DIRS[@]} -eq 0 ]; then
+  echo -e "${YELLOW}No filelist  -- $FILELIST_NAME or flags detected. Defaulting to current directory.${RESET}"
+  TARGET_DIRS+=("$DEFAULT_DIR")
+fi
+
+# Read exclude file if it exists
+EXCLUDE_LIST=()
+if [ -f "$DEFAULT_DIR/$EXCLUDE_FILE" ]; then
+  echo -e "${YELLOW}Using exclusion list: $EXCLUDE_FILE${RESET}"
+  mapfile -t EXCLUDE_LIST <"$DEFAULT_DIR/$EXCLUDE_FILE"
+fi
+
+# Notify user of concatenated file location
+CONCAT_FILE_PATH="$DEFAULT_DIR/$CONCAT_FILE_NAME"
+>"$CONCAT_FILE_PATH"
+
+# Function to check if a file or directory is excluded
+is_excluded() {
+  local ITEM="$1"
+  for EXCLUDED in "${EXCLUDE_LIST[@]}"; do
+    if [[ "$ITEM" == *"$EXCLUDED"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Counters for success and failure
+success_count=0
+failure_count=0
+
+# Process each file or directory
+for TARGET in "${TARGET_DIRS[@]}"; do
+  TARGET=$(eval echo "$TARGET") # Expand variables or ~
+  if [ -d "$TARGET" ]; then
+    if is_excluded "$TARGET"; then
+      echo -e "${YELLOW}Skipping excluded directory: $TARGET${RESET}"
+      continue
+    fi
+    echo -e "${GREEN}Processing directory: $TARGET${RESET}"
+    for FILE in "$TARGET"/*; do
+      if [ -f "$FILE" ]; then
+        if is_excluded "$FILE"; then
+          echo -e "${YELLOW}Skipping excluded file: $FILE${RESET}"
+          continue
+        fi
+        echo "=== $(basename "$FILE") ===" >>"$CONCAT_FILE_PATH"
+        cat "$FILE" >>"$CONCAT_FILE_PATH" && echo -e "\n\n" >>"$CONCAT_FILE_PATH"
+        echo -e "${GREEN}Added $FILE to $CONCAT_FILE_NAME${RESET}"
+        ((success_count++))
+      fi
+    done
+  elif [ -f "$TARGET" ]; then
+    if is_excluded "$TARGET"; then
+      echo -e "${YELLOW}Skipping excluded file: $TARGET${RESET}"
+      continue
+    fi
+    echo -e "${GREEN}Processing file: $TARGET${RESET}"
+    echo "=== $(basename "$TARGET") ===" >>"$CONCAT_FILE_PATH"
+    cat "$TARGET" >>"$CONCAT_FILE_PATH" && echo -e "\n\n" >>"$CONCAT_FILE_PATH"
+    echo -e "${GREEN}Added $TARGET to $CONCAT_FILE_NAME${RESET}"
+    ((success_count++))
+  else
+    echo -e "${RED}Target not found: $TARGET${RESET}"
+    ((failure_count++))
+  fi
+done
+
+# Notify user of completion
+echo -e "${GREEN}Concatenation complete.${RESET}"
+echo -e "${GREEN}$success_count${RESET} files added, ${RED}$failure_count${RESET} targets failed."
+echo -e "${GREEN}Output saved to: $CONCAT_FILE_PATH${RESET}"
+
+# Copy the output file to the clipboard
+if command -v xclip &>/dev/null; then
+  xclip -selection clipboard <"$CONCAT_FILE_PATH"
+  echo -e "${GREEN}Copied .fastcat.txt to clipboard using xclip.${RESET}"
+elif command -v xsel &>/dev/null; then
+  xsel --clipboard <"$CONCAT_FILE_PATH"
+  echo -e "${GREEN}Copied .fastcat.txt to clipboard using xsel.${RESET}"
+else
+  echo -e "${YELLOW}Neither xclip nor xsel is installed. Cannot copy to clipboard.${RESET}"
+fi
+
+
+
+=== remote-file.sh ===
+#!/bin/bash
+
+# Usage: ./remote-file.sh get|send [-s server] [-src source_path] [-dst destination_path]
+
+# Default paths
+DEFAULT_SRC_PATH="~/Downloads/"
+DEFAULT_DST_PATH="~/Uploads/"
+
+# Initialize variables
+ACTION=""
+SRC_PATH="$DEFAULT_SRC_PATH"
+DST_PATH="$DEFAULT_DST_PATH"
+SELECTED_SERVER=""
+PASSWORD=""
+
+# Remote server credentials
+SERVERS=(
+  "192.168.1.85:Raspberry Pi 4:03231997:braydenchaffee"
+  "192.168.1.78:Pi Zero W:03231997:braydenchaffee"
+  "192.168.1.225:MacBook Pro:6066:lizzyjacques"
+  "192.168.1.239:Archlinxx Desktop:0323:braydenchaffee"
+)
+
+# Function to display usage
+usage() {
+  echo "Usage: $0 get|send [-s server] [-src source_path] [-dst destination_path]"
+  exit 1
+}
+
+# Parse arguments
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+  get | send)
+    ACTION="$1"
+    ;;
+  -s | --server)
+    SELECTED_SERVER="$2"
+    shift
+    ;;
+  -src | --source)
+    SRC_PATH="$2"
+    shift
+    ;;
+  -dst | --destination)
+    DST_PATH="$2"
+    shift
+    ;;
+  *)
+    echo "Unknown option: $1"
+    usage
+    ;;
+  esac
+  shift
+done
+
+# Validate action
+if [[ -z "$ACTION" ]]; then
+  echo "Error: You must specify an action (get or send)."
+  usage
+fi
+
+# Prompt user to select a server if none provided
+if [[ -z "$SELECTED_SERVER" ]]; then
+  echo "Select the server:"
+  select SERVER_INFO in "${SERVERS[@]}"; do
+    if [[ -n "$SERVER_INFO" ]]; then
+      SELECTED_SERVER="$SERVER_INFO"
+      break
+    else
+      echo "Invalid selection."
+    fi
+  done
+fi
+
+# Extract server details
+SERVER=$(echo "$SELECTED_SERVER" | cut -d':' -f1)
+DEVICE=$(echo "$SELECTED_SERVER" | cut -d':' -f2)
+PASSWORD=$(echo "$SELECTED_SERVER" | cut -d':' -f3)
+USER=$(echo "$SELECTED_SERVER" | cut -d':' -f4)
+
+echo "Selected server: $DEVICE ($SERVER)"
+
+# Perform the action
+if [[ "$ACTION" == "get" ]]; then
+  echo "Fetching file from $DEVICE..."
+  sshpass -p "$PASSWORD" scp "$USER@$SERVER:$SRC_PATH" "$DST_PATH"
+elif [[ "$ACTION" == "send" ]]; then
+  echo "Sending file to $DEVICE..."
+  sshpass -p "$PASSWORD" scp "$SRC_PATH" "$USER@$SERVER:$DST_PATH"
+else
+  echo "Invalid action. Use 'get' or 'send'."
+  exit 1
+fi
+
+
+
+=== upload-files.txt ===
+/etc/fstab
+/etc/hostname
+/etc/hosts
+/etc/pacman.conf
+/etc/systemd/zram-generator.conf
+$HOME/.bashrc
+$HOME/.zshrc
+$HOME/.config/hypr/hyprland.conf
+$HOME/.config/waybar/config
+$HOME/.config/waybar/style.css
+$HOME/.config/libinput-gestures.conf
+$HOME/.config/environment.d/envvars.conf
+$HOME/.config/msmtmp/msmtmprc
+$HOME/.config/nvim/init.lua
+$HOME/.config/kitty/kitty.conf
+$HOME/.config/picom/picom.conf
+$HOME/Documents/SystemInfo/pacman-installs.txt
+$HOME/Documents/SystemInfo/installed-packages.log
+$HOME/.gitconfig
+$HOME/.mbsyncrc
+$HOME/.config/mimeapps.list
+$HOME/.config/user-dirs.dirs
+$HOME/.config/gtk-3.0/settings.ini
+DIR:$HOME/Scripts/
+DIR:$HOME/.config/systemd/user/
+DIR:$HOME/.local/bin/
+DIR:$HOME/.config/autostart/
+
+
+
+
+=== upload-sysfiles.sh ===
+
+#!/bin/bash
+
+# Default backup directory
+BACKUP_DIR="${PWD}/backups"
+mkdir -p "$BACKUP_DIR"
+
+# Function to create a backup
+backup_file() {
+    # Determine the file to back up
+    if [ $# -eq 0 ]; then
+        # Find all files in the current directory
+        FILES=($(find . -maxdepth 1 -type f))
+        FILE_COUNT=${#FILES[@]}
+
+        if [ $FILE_COUNT -eq 0 ]; then
+            echo "Error: No files found in the current directory to back up."
+            exit 1
+        elif [ $FILE_COUNT -eq 1 ]; then
+            FILE="${FILES[0]}"
+        else
+            # Use fuzzy finder for multiple files
+            echo "Select a file to back up:"
+            if command -v fzf &>/dev/null; then
+                FILE=$(printf "%s\n" "${FILES[@]}" | fzf)
+            else
+                echo "Error: Multiple files found. Install 'fzf' for easy selection."
+                exit 1
+            fi
+        fi
+    elif [ $# -eq 1 ]; then
+        FILE=$1
+    else
+        echo "Usage: quickbackup [file]"
+        exit 1
+    fi
+
+    # Ensure the file exists
+    if [ ! -f "$FILE" ]; then
+        echo "Error: File '$FILE' does not exist."
+        exit 1
+    fi
+
+    # Simplified filenames for backups
+    FILENAME=$(basename "$FILE")
+    BACKUP_PREFIX="${BACKUP_DIR}/${FILENAME}"
+    BACKUPS=("$BACKUP_PREFIX".*)
+
+    # Remove the oldest backup if more than 2 exist
+    if [ ${#BACKUPS[@]} -gt 1 ]; then
+        OLDEST_BACKUP=$(ls -t "${BACKUPS[@]}" 2>/dev/null | tail -n 1)
+        rm -f "$OLDEST_BACKUP"
+    fi
+
+    # Determine the next available version
+    NEXT_VERSION=$(($(ls "${BACKUP_PREFIX}".* 2>/dev/null | wc -l) + 1))
+
+    # Save the backup
+    BACKUP_FILE="${BACKUP_PREFIX}.${NEXT_VERSION}"
+    cp "$FILE" "$BACKUP_FILE"
+    echo "Backup for '$FILE' created as '$BACKUP_FILE'."
+}
+
+# Function to restore a backup
+restore_backup() {
+    if [ ! -d "$BACKUP_DIR" ]; then
+        echo "Error: Backup directory $BACKUP_DIR does not exist."
+        exit 1
+    fi
+
+    BACKUPS=("$BACKUP_DIR"/*)
+
+    if [ ${#BACKUPS[@]} -eq 0 ]; then
+        echo "Error: No backup files found in $BACKUP_DIR."
+        exit 1
+    elif [ ${#BACKUPS[@]} -eq 1 ]; then
+        SELECTED_BACKUP="${BACKUPS[0]}"
+    else
+        echo "Select a backup to restore:"
+        if command -v fzf &>/dev/null; then
+            SELECTED_BACKUP=$(printf "%s\n" "${BACKUPS[@]}" | fzf)
+        else
+            echo "Error: Multiple backups found. Install 'fzf' for easy selection."
+            exit 1
+        fi
+    fi
+
+    if [ -n "$SELECTED_BACKUP" ]; then
+        RESTORED_FILE=$(basename "${SELECTED_BACKUP}" | sed 's/\.[0-9]*$//')
+        cp "$SELECTED_BACKUP" "$RESTORED_FILE"
+        echo "Backup restored as '$RESTORED_FILE'."
+    else
+        echo "No backup selected. Restore operation canceled."
+        exit 1
+    fi
+}
+
+# Main script logic
+case "$1" in
+    -r)
+        restore_backup
+        ;;
+    *)
+        backup_file "$@"
+        ;;
+esac
+
+
+

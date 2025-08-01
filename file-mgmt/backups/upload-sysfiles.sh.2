@@ -1,0 +1,142 @@
+#!/bin/bash
+
+# Aggregates all files and directories listed in CONFIG_FILE to UPLOAD_DIR
+# Writes installed packages to ~/Documents/SystemInfo/pacman-installs.txt
+# Opens Thunar (file manager) to upload directory and opens project in browser
+# Concatenates all files into a single file named '1 - Consolidated.txt'
+
+# Script metadata
+SCRIPT_NAME="FileAggr_GPT"
+SCRIPT_VERSION="1.7.0"
+
+# Print script name and version
+echo -e "\e[34m$SCRIPT_NAME - Version $SCRIPT_VERSION\e[0m"
+echo
+
+# Define directories
+UPLOAD_DIR="$HOME/Uploads/ChatGPT"
+SYSTEM_INFO_DIR="$HOME/Documents/SystemInfo"
+CONFIG_FILE="$HOME/Scripts/file-mgmt/upload-files.txt"
+CONCAT_FILE="$UPLOAD_DIR/1 - Consolidated.txt"
+
+# Create directories if they don't exist
+mkdir -p "$UPLOAD_DIR"
+mkdir -p "$SYSTEM_INFO_DIR"
+
+# Colors for output
+GREEN="\e[32m"
+RED="\e[31m"
+YELLOW="\e[33m"
+RESET="\e[0m"
+
+# Save installed packages
+SYSTEM_INFO_FILE="$SYSTEM_INFO_DIR/pacman-installs.txt"
+echo -e "${YELLOW}Saving installed packages to $GEN_FILE...${RESET}"
+if pacman -Qqe > "$SYSTEM_INFO_FILE" 2>/dev/null; then
+    echo -e "${GREEN}Installed packages saved to $SYSTEM_INFO_FILE${RESET}"
+else
+    echo -e "${RED}Failed to save installed packages.${RESET}"
+fi
+
+# Save system information to the same file
+echo -e "\n=== System Information (inxi -Fxz) ===\n" >> "$SYSTEM_INFO_FILE"
+inxi -Fxz >> "$SYSTEM_INFO_FILE" 2>/dev/null
+
+echo -e "\n=== Memory Information (free -h) ===\n" >> "$SYSTEM_INFO_FILE"
+free -h >> "$SYSTEM_INFO_FILE"
+
+echo -e "\n=== Disk Usage (df -h) ===\n" >> "$SYSTEM_INFO_FILE"
+df -h >> "$SYSTEM_INFO_FILE"
+
+echo -e "\n=== Wayland Session Variables ===\n" >> "$SYSTEM_INFO_FILE"
+env | grep WAYLAND >> "$SYSTEM_INFO_FILE"
+
+
+# Check if the config file exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${RED}Error: Config file '$CONFIG_FILE' not found.${RESET}"
+    exit 1
+fi
+
+# Counters for success and failure
+success_count=0
+failure_count=0
+
+# Start with an empty concatenated file
+> "$CONCAT_FILE"
+
+# Process each file or directory from the config file
+while IFS= read -r ENTRY; do
+    # Skip empty lines and comments
+    [[ -z "$ENTRY" || "$ENTRY" == \#* ]] && continue
+
+    # Expand tilde and variables
+    ENTRY=$(eval echo "$ENTRY")
+
+    # Check if it's a directory specification
+    if [[ "$ENTRY" == DIR:* ]]; then
+        DIR_PATH="${ENTRY#DIR:}"
+
+        if [ -d "$DIR_PATH" ]; then
+            echo -e "${GREEN}Processing directory: $DIR_PATH${RESET}"
+            # Process all files in the directory
+
+	      find "$DIR_PATH" -type d -name "backups" -prune -o -type f -print | while IFS= read -r FILE; do
+		DEST="$UPLOAD_DIR/$(basename "$FILE")"
+		if cp "$FILE" "$DEST" 2>/dev/null; then
+		    echo -e "${GREEN}Copied $FILE to $DEST${RESET}"
+		    ((success_count++))
+
+		    # Add to the concatenated file
+		    echo "=== $(basename "$FILE") ===" >> "$CONCAT_FILE"
+		    cat "$FILE" >> "$CONCAT_FILE"
+		    echo -e "\n\n" >> "$CONCAT_FILE"
+		else
+		    echo -e "${RED}Failed to copy $FILE to $DEST${RESET}"
+		    ((failure_count++))
+		fi
+	    done   
+        else
+            echo -e "${YELLOW}Directory not found: $DIR_PATH${RESET}"
+        fi
+
+    # If it's a regular file path
+    elif [ -f "$ENTRY" ]; then
+        DEST="$UPLOAD_DIR/$(basename "$ENTRY")"
+        if cp "$ENTRY" "$DEST" 2>/dev/null; then
+            echo -e "${GREEN}Copied $ENTRY to $DEST${RESET}"
+            ((success_count++))
+
+            # Add to the concatenated file
+            echo "=== $(basename "$ENTRY") ===" >> "$CONCAT_FILE"
+            cat "$ENTRY" >> "$CONCAT_FILE"
+            echo -e "\n\n" >> "$CONCAT_FILE"
+        else
+            echo -e "${RED}Failed to copy $ENTRY to $DEST${RESET}"
+            ((failure_count++))
+        fi
+    else
+        echo -e "${YELLOW}File not found: $ENTRY${RESET}"
+    fi
+done < "$CONFIG_FILE"
+
+# Notify user of completion
+echo -e "${GREEN}Files gathered in $UPLOAD_DIR${RESET}"
+echo -e "${GREEN}$success_count${RESET}/$((success_count + failure_count)) files copied successfully, ${RED}$failure_count${RESET} failed."
+echo -e "${GREEN}Concatenated file created at: $CONCAT_FILE${RESET}"
+
+# Open Thunar to the upload directory
+if command -v thunar &>/dev/null; then
+    thunar "$UPLOAD_DIR" &
+else
+    echo -e "${YELLOW}Thunar is not installed. Files are in $UPLOAD_DIR.${RESET}"
+fi
+
+# Open project folder in browser
+if command -v xdg-open &>/dev/null; then
+    echo -e "${YELLOW}Opening project page in browser...${RESET}"
+    xdg-open "https://chat.openai.com/" &
+else
+    echo -e "${RED}Failed to open browser. Please visit https://chat.openai.com/${RESET}"
+fi
+

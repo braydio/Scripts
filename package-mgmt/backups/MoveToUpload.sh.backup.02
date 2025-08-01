@@ -1,0 +1,61 @@
+#!/bin/bash
+
+# Define the directory to store gathered files
+UPLOAD_DIR="$HOME/Uploads/ChatGPT"
+
+# Create the directory if it doesn't exist
+mkdir -p "$UPLOAD_DIR"
+
+# Temporary renaming of system files for upload compatibility
+TEMP_FILES=(
+    "/etc/fstab:$UPLOAD_DIR/fstab.txt"
+    "/etc/hostname:$UPLOAD_DIR/hostname.txt"
+    "/etc/hosts:$UPLOAD_DIR/hosts.txt"
+)
+
+# Rename system files for upload compatibility
+for TEMP_FILE in "${TEMP_FILES[@]}"; do
+    SRC="${TEMP_FILE%%:*}"
+    DEST="${TEMP_FILE##*:}"
+    if cp "$SRC" "$DEST" 2>/dev/null; then
+        echo "Copied $SRC to $DEST"
+    else
+        echo "Failed to copy $SRC to $DEST"
+    fi
+done
+
+# List of files to copy
+FILES=(
+    "/etc/pacman.conf"
+    "$UPLOAD_DIR/fstab.txt"
+    "$UPLOAD_DIR/hostname.txt"
+    "$UPLOAD_DIR/hosts.txt"
+    "$HOME/.bashrc"
+    "$HOME/.config/hypr/hyprland.conf"
+)
+
+# Copy each file if it exists
+for FILE in "${FILES[@]}"; do
+    if [ -f "$FILE" ]; then
+        if cp "$FILE" "$UPLOAD_DIR/" 2>/dev/null; then
+            echo "Successfully copied $FILE to $UPLOAD_DIR"
+        else
+            echo "Failed to copy $FILE to $UPLOAD_DIR"
+        fi
+    else
+        echo "File not found: $FILE"
+    fi
+done
+
+# Notify user of completion
+echo "Files gathered in $UPLOAD_DIR"
+
+# Open Firefox to the ChatGPT project URL
+firefox https://chatgpt.com/g/g-p-675e3fc315d481918227664d2b6bf82f-archlinux-install/project &
+
+# Open Thunar to the upload directory
+thunar "$UPLOAD_DIR" &
+
+# Notify user that applications have been launched
+echo "Firefox and Thunar have been opened. You can now drag and drop files into the ChatGPT interface."
+

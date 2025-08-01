@@ -1,0 +1,8 @@
+$HOME/.bashrc
+$HOME/.bash_aliases
+$HOME/.mbsyncrc
+$HOME/.config/hypr/hyprland.conf
+$HOME/.config/waybar/config
+$HOME/.config/waybar/style.css
+$HOME/.config/nvim/init.lua
+
