@@ -1,15 +1,14 @@
 #!/bin/bash
 
-# Aggregates files and directories into a single concatenated file named ".fastcat.txt"
-# Uses `fastcat.txt` in the current directory if available; defaults to the current directory otherwise
-# Supports exclusion of files and directories specified in `nocat.txt`
-# Now includes a directory mapping and excludes unsupported file formats by default
+# Aggregates files and directories into a single concatenated file named ".fastcat.local"
+# Uses a filelist (default: 'fastcat') in the current directory if available, or all files in current dir otherwise.
+# Supports exclusion via an exclude list (default: 'nocat').
+# Includes a directory mapping and excludes unsupported file formats by default.
 
 # Script metadata
-SCRIPT_NAME="Fast-Cat"
-SCRIPT_VERSION="1.8.0"
+SCRIPT_NAME="FastCat"
+SCRIPT_VERSION="1.9.0"
 
-# Print script name and version
 echo -e "\e[34m$SCRIPT_NAME - Version $SCRIPT_VERSION\e[0m"
 echo
 
@@ -21,9 +20,9 @@ RESET="\e[0m"
 
 # Default settings
 DEFAULT_DIR=$(pwd)
-CONCAT_FILE_NAME=".fastcat.txt"
-FILELIST_NAME="fastcat.txt"
-EXCLUDE_FILE="nocat.txt"
+CONCAT_FILE_NAME=".fastcat.local"
+FILELIST_NAME="fastcat"
+EXCLUDE_FILE="nocat"
 MAPPING_DEPTH=2
 
 TREE_MAP_PATH="$DEFAULT_DIR/.tree-map.txt"
@@ -32,25 +31,37 @@ UNSUPPORTED_EXTENSIONS=("*.exe" "*.bin" "*.iso" "*.img" "*.mp4" "*.avi" "*.mkv" 
 
 # Function to display help/usage
 show_help() {
-  echo "Aggregates files and directories into a single concatenated file named .fastcat.txt"
-  echo "Uses fastcat.txt in the current directory if available"
-  echo "Defaults to all (supported) files in the current directory otherwise"
-  echo "Supports exclusion of files and directories flagged or specified in nocat.txt"
-
-  echo "Usage: $0 [OPTIONS]"
-  echo ""
+  echo "Aggregates files and directories into a single concatenated file (.fastcat.local)"
+  echo "If a filelist is specified with -f or --file, each line is treated as a file or directory to process."
+  echo "If not specified, will look for a file named 'fastcat' in the current directory by default."
+  echo "Otherwise, all supported files in the current directory are processed."
+  echo "Files/directories listed in an exclude list (--nocat <file>, default: 'nocat') are always excluded if present."
+  echo
+  echo "Usage: fastcat [options]"
+  echo
   echo "Options:"
-  echo "  -h, --help            Display this help message and exit."
-  echo "  -d, --dir <dir>       Specify a target directory to process."
-  echo "  -f, --file <file>     Specify a file to be processed."
-  echo "  -m, --map-depth <n>   Set the directory tree map depth (default: 2)."
-  echo "  --map-only            Only generate the directory map."
+  echo "  -h, --help                Show this help message and exit."
+  echo "  -d, --dir <dir>           Target a directory to recursively process (can be repeated)."
+  echo "  -f, --file <file>         Specify a file list to use (default: 'fastcat' in the current directory)."
+  echo "      --nocat <file>        Specify a file list of files/directories to exclude (default: 'nocat' in the current directory)."
+  echo "  -m, --map-depth <n>       Set directory tree map depth (default: 2)."
+  echo "      --map-only            Only output the directory tree, don't generate the aggregate file."
+  echo
+  echo "Notes:"
+  echo "  - If no -d or -f is provided, and no 'fastcat' file exists, all supported files in the current directory are processed."
+  echo "  - If a file list is given with -f or if 'fastcat' exists, only those files/directories are processed (one per line)."
+  echo "  - If --nocat <file> is given or 'nocat' exists, files/directories listed are excluded."
+  echo "  - Known binary, media, or archive extensions are always excluded."
+  echo "  - Directory tree mapping is output to .tree-map.txt."
+  echo
   exit 0
 }
 
 # Parse arguments
 TARGET_DIRS=()
 USE_FILELIST=false
+USER_FILELIST=""
+USER_EXCLUDELIST=""
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
@@ -60,7 +71,11 @@ while [[ "$#" -gt 0 ]]; do
     shift
     ;;
   -f | --file)
-    TARGET_DIRS+=("$2")
+    USER_FILELIST="$2"
+    shift
+    ;;
+  --nocat)
+    USER_EXCLUDELIST="$2"
     shift
     ;;
   -m | --map-depth)
@@ -76,27 +91,34 @@ while [[ "$#" -gt 0 ]]; do
   shift
 done
 
-# Use `fastcat.txt` if it exists and no flags are passed
-if [ -f "$DEFAULT_DIR/$FILELIST_NAME" ] && [ ${#TARGET_DIRS[@]} -eq 0 ]; then
+# Use specified filelist if provided, then fallback to default
+if [[ -n "$USER_FILELIST" ]] && [[ -f "$DEFAULT_DIR/$USER_FILELIST" ]]; then
+  echo -e "${YELLOW}Using filelist: $USER_FILELIST${RESET}"
+  mapfile -t TARGET_DIRS <"$DEFAULT_DIR/$USER_FILELIST"
+  USE_FILELIST=true
+elif [[ -f "$DEFAULT_DIR/$FILELIST_NAME" ]]; then
   echo -e "${YELLOW}Using filelist: $FILELIST_NAME${RESET}"
   mapfile -t TARGET_DIRS <"$DEFAULT_DIR/$FILELIST_NAME"
   USE_FILELIST=true
 fi
 
-# Default to current directory if no filelist and no flags
+# Default to current directory if no filelist and no dirs specified
 if [ ${#TARGET_DIRS[@]} -eq 0 ]; then
-  echo -e "${YELLOW}No filelist -- $FILELIST_NAME or flags detected. Defaulting to current directory.${RESET}"
+  echo -e "${YELLOW}No filelist -- $FILELIST_NAME or -f flag detected. Defaulting to current directory.${RESET}"
   TARGET_DIRS+=("$DEFAULT_DIR")
 fi
 
-# Read exclude file if it exists
+# Read exclude file if specified or if default exists
 EXCLUDE_LIST=()
-if [ -f "$DEFAULT_DIR/$EXCLUDE_FILE" ]; then
+if [[ -n "$USER_EXCLUDELIST" ]] && [[ -f "$DEFAULT_DIR/$USER_EXCLUDELIST" ]]; then
+  echo -e "${YELLOW}Using exclusion list: $USER_EXCLUDELIST${RESET}"
+  mapfile -t EXCLUDE_LIST <"$DEFAULT_DIR/$USER_EXCLUDELIST"
+elif [[ -f "$DEFAULT_DIR/$EXCLUDE_FILE" ]]; then
   echo -e "${YELLOW}Using exclusion list: $EXCLUDE_FILE${RESET}"
   mapfile -t EXCLUDE_LIST <"$DEFAULT_DIR/$EXCLUDE_FILE"
 fi
 
-# Expand wildcard exclusions from nocat.txt
+# Expand wildcard exclusions from exclusion file
 EXCLUDED_EXTENSIONS=()
 for EXCLUDE in "${EXCLUDE_LIST[@]}"; do
   if [[ "$EXCLUDE" == *.* ]]; then
@@ -158,9 +180,7 @@ print_tree() {
     fi
 
     if [ -d "$ENTRY" ]; then
-      # Print to terminal with color
       echo -e "${PREFIX}${CONNECTOR} ${YELLOW}$(basename "$ENTRY")${RESET}"
-      # Print to file without color
       echo -e "${PREFIX}${CONNECTOR} $(basename "$ENTRY")" >>"$TREE_MAP_PATH"
       print_tree "$ENTRY" "$NEXT_PREFIX" $((DEPTH + 1))
     elif [ -f "$ENTRY" ]; then
@@ -239,10 +259,10 @@ echo -e "${GREEN}Output saved to: $CONCAT_FILE_PATH${RESET}"
 # Copy the output file to the clipboard
 if command -v xclip &>/dev/null; then
   xclip -selection clipboard <"$CONCAT_FILE_PATH"
-  echo -e "${GREEN}Copied .fastcat.txt to clipboard using xclip.${RESET}"
+  echo -e "${GREEN}Copied .fastcat.local to clipboard using xclip.${RESET}"
 elif command -v xsel &>/dev/null; then
   xsel --clipboard <"$CONCAT_FILE_PATH"
-  echo -e "${GREEN}Copied .fastcat.txt to clipboard using xsel.${RESET}"
+  echo -e "${GREEN}Copied .fastcat.local to clipboard using xsel.${RESET}"
 else
   echo -e "${YELLOW}Neither xclip nor xsel is installed. Cannot copy to clipboard.${RESET}"
 fi
