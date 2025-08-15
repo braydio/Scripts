@@ -1,47 +1,51 @@
 #!/bin/bash
 
-# Default values
-DELAY=0
-MODE="window"
 DIR="$HOME/Pictures/Screenshots"
+mkdir -p "$DIR"
+DATE=$(date '+%Y-%m-%d-%H%M%S')
 
-# Parse arguments
-while [[ "$#" -gt 0 ]]; do
-  case $1 in
-  --delay | -d)
-    DELAY="$2"
-    shift
-    ;;
-  --mode | -m)
-    MODE="$2"
-    shift
-    ;;
-  --dir)
-    DIR="$2"
-    shift
-    ;;
-  *)
-    echo "❌ Unknown option: $1"
-    exit 1
-    ;;
-  esac
-  shift
-done
+# Default to region if no arg
+MODE="${1:-region}"
 
-# Validate mode
-if [[ "$MODE" != "window" && "$MODE" != "output" && "$MODE" != "region" ]]; then
-  echo "❌ Invalid mode: $MODE"
-  echo "Valid modes: window, output, region"
+case "$MODE" in
+region)
+  MODEARG="-m region"
+  ;;
+window)
+  MODEARG="-m window"
+  ;;
+screen | full)
+  MODEARG="-m output"
+  ;;
+*)
+  echo "Usage: $0 [region|window|screen]"
+  echo "  region - screenshot a selected region (default)"
+  echo "  window - screenshot a selected window"
+  echo "  screen - screenshot the whole screen"
+  exit 1
+  ;;
+esac
+
+FILE="$DIR/${DATE}_hyprshot.png"
+
+# Call hyprshot with selected mode, output to file
+hyprshot $MODEARG -o "$FILE"
+
+if [ ! -f "$FILE" ]; then
+  echo "Error: Screenshot not saved."
   exit 1
 fi
 
-# Ensure the directory exists
-mkdir -p "$DIR"
+# Copy to clipboard (Wayland or X11)
+if command -v wl-copy &>/dev/null; then
+  cat "$FILE" | wl-copy
+  CLIPMSG="Copied to clipboard with wl-copy."
+elif command -v xclip &>/dev/null; then
+  xclip -selection clipboard -t image/png -i "$FILE"
+  CLIPMSG="Copied to clipboard with xclip."
+else
+  CLIPMSG="No clipboard tool found (install wl-clipboard or xclip)."
+fi
 
-# Filename with timestamp
-FILENAME="$DIR/screenshot_$(date +%Y-%m-%d_%H-%M-%S).png"
-
-# Perform delayed capture
-echo "📸 Capturing in $DELAY seconds... Mode: $MODE → $FILENAME"
-sleep "$DELAY"
-hyprshot -m "$MODE" -o "$FILENAME"
+echo "Screenshot saved: $FILE"
+echo "$CLIPMSG"

@@ -5,7 +5,7 @@ SERVERS=(
   "192.168.1.198:Raspberry Pi 4:03231997:braydenchaffee"
   "192.168.1.78:Pi Zero W:03231997:braydenchaffee"
   "192.168.1.225:MacBook Pro:braydenchaffee"
-  "192.168.1.228:archlinux:0323:braydenchaffee"
+  "192.168.1.214:archlinux:0323:braydenchaffee"
 )
 
 DEFAULT_SERVER_INDEX=4
