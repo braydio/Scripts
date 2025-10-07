@@ -14,7 +14,7 @@ echo
 
 # Define directories
 GIT_BACKUP_DIR="$HOME/Uploads/Github/dotfiles"
-CONFIG_FILE="$HOME/Scripts/file-mgmt/dotgit-files.txt"
+CONFIG_FILE="$HOME/Scripts/system/file_management/dotgit-files.txt"
 LOG_FILE="$GIT_BACKUP_DIR/backup_failures.log"
 
 # Create Git backup directory if it doesn't exist
