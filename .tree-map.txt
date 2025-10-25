@@ -1,0 +1,91 @@
+Directory Tree Mapping
+[33m/home/braydenchaffee/Scripts[0m
+├── Codex
+│   └── pnx_main.sh
+├── device-mgmt
+│   ├── log_logitech.sh
+│   ├── servarr-perms.sh
+│   └── update-all.sh
+├── file-mgmt
+│   ├── anything-sysfiles.py
+│   ├── backups
+│   ├── cred-manager.sh
+│   ├── dotgit-files.txt
+│   ├── fast-cat.sh
+│   ├── gitcommit-alias.sh
+│   ├── git_version.sh
+│   ├── inject-gptDesktop.sh
+│   ├── nohup.out
+│   ├── paste-gptDesktop.sh
+│   ├── quick-backup.sh
+│   ├── remote-file.sh
+│   ├── sync-script.sh
+│   ├── uncat.sh
+│   ├── upload-files.txt
+│   ├── upload-gitcommit.sh
+│   └── upload-sysfiles.sh
+├── kitty
+│   └── launch-kitty.sh
+├── media
+│   ├── autofiller.py
+│   ├── bad_files_check.sh
+│   ├── check_encoding.sh
+│   ├── corrupt_checker.sh
+│   └── shrink_media.sh
+├── package-mgmt
+│   ├── backups
+│   ├── cleanup-tool.sh
+│   ├── package-updates.sh
+│   └── system-updates.sh
+├── project-mgmt
+│   ├── confuzzy.sh
+│   └── project-fzy.sh
+├── self
+│   ├── doinglist.sh
+│   └── hydration_logger.sh
+├── shell-mgmt
+│   ├── free-key.sh
+│   └── nohup-handler.sh
+├── system-checker
+│   └── processes.py
+├── temp
+│   └── check_codec.py
+├── terminal-mgmt
+│   ├── KittyThemes.sh
+│   └── setup-workspace.sh
+├── upload-files.txt
+├── utility
+│   ├── archnotes-linux.sh
+│   ├── authy.sh
+│   ├── btfix.sh
+│   ├── DockerCompose.sh
+│   ├── dotTellerAuth.sh
+│   ├── energy_report.sh
+│   ├── gpt_api.py
+│   ├── hyprshot-advanced.sh
+│   ├── hyprshot-snap.sh
+│   ├── KeybindSearch.py
+│   ├── mount-remote.sh
+│   ├── Notes.sh
+│   ├── Pomodoro.sh
+│   ├── profiler.sh
+│   ├── remindme.sh
+│   ├── screenshot.sh
+│   ├── send-command.sh
+│   ├── send-discord.sh
+│   ├── show-bindings.py
+│   ├── silica.sh
+│   ├── timer.sh
+│   ├── to-do.sh
+│   ├── wallpaper-lockscreen.sh
+│   └── workspace_mover.sh
+└── waybar
+    ├── bluetooth.sh
+    ├── cpu-temp.sh
+    ├── custom-gmail.sh
+    ├── custom-weather.py
+    ├── json
+    ├── requests
+    ├── themer.sh
+    ├── weather
+    └── weather.sh

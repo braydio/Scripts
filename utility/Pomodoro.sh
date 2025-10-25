@@ -1,49 +1,53 @@
-
 #!/bin/bash
 
-# Check if parameters are provided
-if [ $# -ne 2 ]; then
-    echo "Usage: Timer <work_duration_minutes> <break_duration_minutes>"
-    exit 1
+# Default values
+default_work=10
+default_break=2
+minecraft_music="$HOME/Music/MinecraftMusic.mp3"
+ipc_socket="/tmp/mpv-socket"
+
+# Usage info
+usage() {
+  echo "Usage: timer [work_minutes] [break_minutes] [message]"
+  echo "Defaults: work=${default_work}m, break=${default_break}m, no message"
+  exit 1
+}
+
+# Parse arguments
+work_duration=${1:-$default_work}
+break_duration=${2:-$default_break}
+custom_message=${3:-""}
+
+# Validate numeric inputs
+if ! [[ "$work_duration" =~ ^[0-9]+$ ]] || ! [[ "$break_duration" =~ ^[0-9]+$ ]]; then
+  echo "Error: durations must be integers (minutes)."
+  usage
 fi
 
-# Parameters
-work_duration=$1  # Work duration in minutes
-break_duration=$2  # Break duration in minutes
-
-# Path to Minecraft music
-minecraft_music="$HOME/Music/MinecraftMusic.mp3"
-
-# Function to start or unpause music
+# Music controls
 play_music() {
-    if pgrep -x "mpv" >/dev/null; then
-        # Unpause music if already playing
-        echo "Pausing music..."
-        playerctl play
-    else
-        # Start music if not already playing
-        mpv --no-video "$minecraft_music" --loop-file=inf --input-ipc-server=/tmp/mpv-socket &
-    fi
+  if pgrep -x "mpv" >/dev/null; then
+    playerctl play
+  else
+    mpv --no-video "$minecraft_music" --loop-file=inf --input-ipc-server="$ipc_socket" >/dev/null 2>&1 &
+  fi
 }
 
-# Function to pause music
 pause_music() {
-    if pgrep -x "mpv" >/dev/null; then
-        echo '{ "command": ["set_property", "pause", true] }' | socat - /tmp/mpv-socket
-    fi
+  if pgrep -x "mpv" >/dev/null; then
+    echo '{ "command": ["set_property", "pause", true] }' | socat - "$ipc_socket"
+  fi
 }
 
-# Pomodoro loop
+# Main loop
 while true; do
-    # Work session
-    notify-send -t 5000 "Pomodoro Timer" "Work session started! Focus for $work_duration minutes."
-    play_music
-    sleep "$((work_duration * 60))"  # Convert minutes to seconds
+  notify-send -t 5000 "Pomodoro Timer" "Work for $work_duration minutes. $custom_message"
+  play_music
+  sleep "$((work_duration * 60))"
 
-    pause_music
-    notify-send "Pomodoro Timer" "Work session completed! Take a $break_duration-minute break."
+  pause_music
+  notify-send "Pomodoro Timer" "Work done! Break for $break_duration minutes."
 
-    # Break session
-    sleep "$((break_duration * 60))"
-    notify-send "Pomodoro Timer" "Break session over! Time to focus again."
+  sleep "$((break_duration * 60))"
+  notify-send "Pomodoro Timer" "Break over. Time to focus again!"
 done

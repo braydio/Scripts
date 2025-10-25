@@ -45,6 +45,12 @@ case "$1" in
   hyprshot -m region -o "$OUTPUT_FILE"
   echo "Saved region screenshot to $OUTPUT_FILE"
   ;;
+-a | --active)
+  SNAP_COUNT=$(get_snap_count)
+  OUTPUT_FILE="${SCREENSHOT_DIR}/snap.${DATE_PART}.${SNAP_COUNT}.jpg"
+  hyprshot -m active -o "$OUTPUT_FILE"
+  echo "Saved active window screenshot to $OUTPUT_FILE"
+  ;;
 -s | --screen)
   SNAP_COUNT=$(get_snap_count)
   OUTPUT_FILE="${SCREENSHOT_DIR}/snap.${DATE_PART}.${SNAP_COUNT}.jpg"
@@ -66,6 +72,7 @@ case "$1" in
 *)
   echo "Usage: snap [options]"
   echo "  -r, --region             Take a region screenshot"
+  echo "  -a, --active             Capture the current active window"
   echo "  -s, --screen             Take a full screen screenshot"
   echo "  -cl, --clipboard         Copy a region screenshot to clipboard"
   echo "  -o, --open <date> [#]    Open the specified snapshot (e.g. snap -o 0117 1)"

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Determine the current terminal for Starship loading
+
+# Check if get_terminal_type function exists
+if ! command -v get_terminal_type >/dev/null 2>&1; then
+  echo "Function: get_terminal_type function not found. Please define it first."
+  exit 1
+fi
+
+TERMINAL_CLASS="$(get_terminal_type)"
+
+case "${TERM_PROGRAM}" in
+"WarpTerminal")
+  echo "🚀 Loading Starship for Warp Terminal..."
+  ;;
+*)
+  case "${TERMINAL_CLASS}" in
+  "kitty")
+    echo "🚀 Loading Starship for Kitty Terminal..."
+    ;;
+  "com.mitchellh.ghostty")
+    echo "🚀 Loading Starship for Ghostty Terminal..."
+    ;;
+  *)
+    # Uncomment below to handle unknown terminals
+    # echo "ℹ️  Starship is not configured for this terminal."
+    ;;
+  esac
+  ;;
+esac

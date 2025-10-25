@@ -1,0 +1,167 @@
+#!/bin/bash
+# tab-presser.sh
+
+# ==============================
+# CONFIG
+# ==============================
+
+RAW_X=1158
+RAW_Y=475
+CLICK_X=$((RAW_X / 2))
+CLICK_Y=$((RAW_Y / 2))
+
+LOGFILE="$HOME/vnc_tab_script.log"
+
+TAB_KEY=15
+SPACE_KEY=57
+
+# timings
+INITIAL_DELAY=4   # one-time delay before first loop
+KEY_INTERVAL=0.80 # fixed delay between individual key presses within a block (seconds)
+
+# loop sleep = BASE_LOOP_SLEEP ± LOOP_JITTER
+BASE_LOOP_SLEEP=4
+LOOP_JITTER=2
+
+# section sleep = BASE_SECTION_SLEEP ± SECTION_JITTER (between Tab/Space sections)
+BASE_SECTION_SLEEP=2
+SECTION_JITTER=0.8
+
+# ==============================
+# LOGGING
+# ==============================
+log() {
+  echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"
+}
+
+# ==============================
+# FLOAT-SAFE RANDOMIZED SLEEP
+# ==============================
+rand_sleep() {
+  local base="$1" jitter="$2"
+  local dur
+  dur="$(awk -v b="$base" -v j="$jitter" 'BEGIN{
+    srand();
+    if (b < 0) b = 0;
+    if (j < 0) j = 0;
+    min = b - j; if (min < 0) min = 0;
+    max = b + j;
+    printf "%.2f", min + rand()*(max-min);
+  }')"
+  log "Sleeping ${dur}s (base=${base}, jitter=±${jitter})"
+  sleep "$dur"
+}
+
+# ==============================
+# YDOTOOL SOCKET DETECTION
+# ==============================
+if [[ -z "$YDOTOOL_SOCKET" ]]; then
+  if [[ -S /run/ydotoold/socket ]]; then
+    export YDOTOOL_SOCKET=/run/ydotoold/socket
+    log "Using root socket at $YDOTOOL_SOCKET"
+  elif [[ -S /run/user/$UID/.ydotool_socket ]]; then
+    export YDOTOOL_SOCKET=/run/user/$UID/.ydotool_socket
+    log "Using user socket at $YDOTOOL_SOCKET"
+  else
+    log "ERROR: no ydotoold socket found"
+    exit 1
+  fi
+fi
+
+# ==============================
+# HELPERS
+# ==============================
+press_block() {
+  local code="$1" times="$2" name="$3"
+  for ((i = 1; i <= times; i++)); do
+    log "Pressing $name ($code) $i/$times"
+    ydotool key ${code}:1 >/dev/null 2>&1
+    ydotool key ${code}:0 >/dev/null 2>&1
+    sleep "$KEY_INTERVAL"
+  done
+}
+
+activate_vnc() {
+  log "Focusing TigerVNC window"
+  hyprctl dispatch focuswindow "class:^Vncviewer$" >/dev/null 2>&1
+  sleep 0.5
+  log "Cursor before move: $(hyprctl cursorpos)"
+  log "Moving cursor to (${CLICK_X},${CLICK_Y}) and clicking"
+  ydotool mousemove --absolute -x "$CLICK_X" -y "$CLICK_Y" >/dev/null 2>&1
+  sleep 0.05
+  log "Cursor after move:  $(hyprctl cursorpos)"
+  ydotool click 0:1 >/dev/null 2>&1
+  ydotool click 0:0 >/dev/null 2>&1
+  sleep 0.3
+}
+
+# ==============================
+# MAIN LOOP
+# ==============================
+sleep "$INITIAL_DELAY"
+
+ITER=0
+while true; do
+  ITER=$((ITER + 1))
+  log "===== Loop ${ITER} start ====="
+
+  activate_vnc
+
+  # First loop = 13 Tabs, later loops = 5 Tabs
+  if [[ $ITER -eq 1 ]]; then
+    echo "Initial run with 5 Tab executions"
+    press_block "$TAB_KEY" 5 "Tab"
+  else
+    echo "Continued - running (3 TAB ON LAPTOP) 9 Tab executions"
+    press_block "$TAB_KEY" 5 "Tab"
+  fi
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  log "Handling inital selection"
+  press_block "$SPACE_KEY" 1 "Space"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  echo "4 Tabs to navigate {SECTION}"
+  press_block "$TAB_KEY" 4 "Tab"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  press_block "$SPACE_KEY" 1 "Space"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+  echo "1 Tab to navigate {SECTION}"
+  press_block "$TAB_KEY" 1 "Tab"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  press_block "$SPACE_KEY" 1 "Space"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  echo "1 Tab to navigate {SECTION}"
+  press_block "$TAB_KEY" 1 "Tab"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  press_block "$SPACE_KEY" 1 "Space"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  echo "5 Tabs to navigate {SECTION}"
+  press_block "$TAB_KEY" 5 "Tab"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  press_block "$SPACE_KEY" 1 "Space"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  echo "1 Tab to navigate {Y/N VIDEO ENJOYMENT FLAG}"
+  press_block "$TAB_KEY" 1 "Tab"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  press_block "$SPACE_KEY" 1 "Space"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  echo "1 Tab - Navigating to Submission Button"
+  press_block "$TAB_KEY" 1 "Tab"
+  rand_sleep "$BASE_SECTION_SLEEP" "$SECTION_JITTER"
+
+  log "-- Submitting Task --"
+  press_block "$SPACE_KEY" 1 "Space"
+
+  log "===== Loop ${ITER} end ====="
+  rand_sleep "$BASE_LOOP_SLEEP" "$LOOP_JITTER"
+done
