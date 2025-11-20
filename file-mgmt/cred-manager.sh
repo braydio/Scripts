@@ -93,6 +93,8 @@ add_credential() {
 
   echo "TYPE: $entry_type" >"$file"
   echo "NAME: $name" >>"$file"
+  # Record creation date/time in ISO-8601 format
+  echo "ADDED: $(date -Iseconds)" >>"$file"
 
   case "$entry_type" in
     credential)

@@ -25,6 +25,17 @@ EXCLUDE_DIRS=(/proc /sys /run /dev /var/lib/docker /mnt /media /srv)
 print_header() { echo -e "\n\033[1;36m==> $1\033[0m"; }
 have() { command -v "$1" &>/dev/null; }
 
+py3_bin() {
+  if [ -x /usr/bin/python3 ]; then echo /usr/bin/python3; return; fi
+  local p
+  p=$(command -v python3 2>/dev/null || true)
+  case "$p" in */.pyenv/shims/*) p="";; esac
+  if [ -n "$p" ]; then echo "$p"; return; fi
+  p=$(command -v python 2>/dev/null || true)
+  if [ -n "$p" ] && "$p" -V 2>&1 | grep -q "Python 3"; then echo "$p"; return; fi
+  echo python3
+}
+
 confirm() {
   local prompt="${1:-Proceed? (y/N): }"
   read -r -p "$prompt" ans || true
@@ -83,11 +94,8 @@ fi
 # ─── Toolchain & App Caches ───────────────────────────────
 print_header "Cleaning pip cache..."
 # Use python -m pip if present; otherwise fall back
-if have python && python -m pip --version &>/dev/null; then
-  python -m pip cache purge || true
-elif have pip; then
-  pip cache purge || true
-fi
+P3=$(py3_bin)
+"$P3" -m pip --version &>/dev/null && "$P3" -m pip cache purge || true
 
 print_header "Cleaning npm cache..."
 if have npm; then npm cache clean --force || true; fi
