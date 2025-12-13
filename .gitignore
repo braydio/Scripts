@@ -1,5 +1,7 @@
 *.env
 *.local
 *.log
+*.cpy
+*.asc
 *.backup
 backups/
