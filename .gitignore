@@ -2,6 +2,7 @@
 *.local
 *.log
 *.cpy
+*.cpython
 *.asc
 *.backup
 backups/
