@@ -1,23 +1,12 @@
 #!/usr/bin/env python3
 """
-Unified system and developer package updater with LLM log summary (Python version)
+Unified Arch/DietPi system updater with Codex CLI log summarization.
 
-Targets:
-  - Arch Linux (pacman, yay, paru)
-  - Debian/DietPi (apt-get)
-Optional managers:
-  - flatpak
-  - docker
-  - pipx, pip (user), npm -g, cargo, gem
-
-LLM summarization chain (in order):
-  1. LocalAI (OpenAI-compatible)
-  2. Ollama
-  3. text-generation-webui (OpenAI-compatible)
-  4. text-generation-webui (native /api/v1/generate)
-  5. OpenAI ChatGPT API (if OPENAI_API_KEY set)
-
-Flags roughly mirror the previous bash script.
+Features:
+- System updates: pacman, yay, paru, apt-get
+- Optional: flatpak updates, language/dev managers, docker image pulls
+- Cleanup + deep-clean (caches, docker, journal)
+- Log capturing with Codex CLI summary (codex exec --json)
 """
 
 import argparse
@@ -28,687 +17,820 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
-from typing import Optional, List, Dict
+import urllib.request
 
-# -------- ANSI colors / styling -------- #
+# --------------------------------------------------------------------------
+# ANSI colors / style
+# --------------------------------------------------------------------------
 
-class Style:
-  RESET = "\033[0m"
-  BOLD = "\033[1m"
-  DIM = "\033[2m"
-  RED = "\033[31m"
-  GREEN = "\033[32m"
-  YELLOW = "\033[33m"
-  BLUE = "\033[34m"
-  CYAN = "\033[36m"
-  GREY = "\033[90m"
-
-
-def color(text: str, *styles: str) -> str:
-  return "".join(styles) + str(text) + Style.RESET
+class C:
+    RESET = "\033[0m"
+    B = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YEL = "\033[33m"
+    BLUE = "\033[34m"
+    CYAN = "\033[36m"
+    GREY = "\033[90m"
 
 
-# -------- Context / helpers -------- #
+def style(text, *colors):
+    return "".join(colors) + str(text) + C.RESET
+
+
+# --------------------------------------------------------------------------
+# Context
+# --------------------------------------------------------------------------
 
 class Ctx:
-  def __init__(
-      self,
-      dry_run: bool,
-      assume_yes: bool,
-      log_file: Path,
-      summary_file: Path,
-      model_name: str,
-      ollama_host: str,
-      ollama_port: int,
-      localai_url: str,
-      tgw_host: str,
-      tgw_port: int,
-      clean_after: bool,
-      deep_clean: bool,
-  ):
-    self.dry_run = dry_run
-    self.assume_yes = assume_yes
-    self.log_file = log_file
-    self.summary_file = summary_file
-    self.model_name = model_name
-    self.ollama_host = ollama_host
-    self.ollama_port = ollama_port
-    self.localai_url = localai_url.rstrip("/")
-    self.tgw_host = tgw_host
-    self.tgw_port = tgw_port
-    self.clean_after = clean_after
-    self.deep_clean = deep_clean
+    def __init__(
+        self,
+        log_file: Path,
+        summary_file: Path,
+        dry_run: bool,
+        assume_yes: bool,
+        clean_after: bool,
+        deep_clean: bool,
+        remove_orphans: bool,
+        aggressive_cache: bool,
+        run_npm_sudo: bool,
+        llm_backend: str,
+    ):
+        self.log_file = log_file
+        self.summary_file = summary_file
+        self.dry_run = dry_run
+        self.assume_yes = assume_yes
+        self.clean_after = clean_after
+        self.deep_clean = deep_clean
+        self.remove_orphans = remove_orphans
+        self.aggressive_cache = aggressive_cache
+        self.run_npm_sudo = run_npm_sudo
+        self.llm_backend = llm_backend
 
-  def log(self, msg: str) -> None:
-    """Log to both console and log file."""
-    line = msg.rstrip("\n")
-    print(line)
+    def log(self, msg: str):
+        msg = msg.rstrip("\n")
+        print(msg)
+        try:
+            with self.log_file.open("a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception:
+            pass
+
+    def banner(self, title: str):
+        bar = "=" * 20
+        self.log(f"\n{bar} {title} {bar}")
+
+    def confirm(self, question: str) -> bool:
+        if self.assume_yes:
+            self.log(style(f"[auto-yes] {question}", C.GREY))
+            return True
+        try:
+            r = input(question + " [y/N]: ").strip().lower()
+        except EOFError:
+            return False
+        return r in ("y", "yes")
+
+    def run(self, cmd, sudo: bool = False, allow_fail: bool = False) -> int:
+        if sudo:
+            cmd = ["sudo"] + cmd
+        cmd_s = " ".join(cmd)
+
+        if self.dry_run:
+            self.log(style(f"[DRY-RUN] + {cmd_s}", C.GREY))
+            return 0
+
+        self.log(style(f"+ {cmd_s}", C.GREY))
+        try:
+            # Tee subprocess output to both terminal and the log file.
+            with self.log_file.open("a", encoding="utf-8") as log_f:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    try:
+                        log_f.write(line)
+                        log_f.flush()
+                    except Exception:
+                        pass
+                rc = proc.wait()
+
+            if rc != 0:
+                self.log(style(f"Command failed {rc}: {cmd_s}", C.RED))
+                if allow_fail:
+                    return rc
+                raise subprocess.CalledProcessError(rc, cmd)
+            return rc
+        except FileNotFoundError:
+            self.log(style(f"Command not found: {cmd[0]}", C.RED))
+            if allow_fail:
+                return 127
+            raise
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+def have(cmd: str) -> bool:
+    return subprocess.call(
+        ["which", cmd],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ) == 0
+
+
+def in_git_repo(path: Path) -> bool:
+    """Return True if the cwd is inside a Git worktree."""
     try:
-      with self.log_file.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
+        proc = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=True,
+        )
+        return proc.stdout.strip() == "true"
     except Exception:
-      # Logging failures should never kill the script
-      pass
+        return False
 
-  def banner(self, title: str) -> None:
-    bar = "=" * 20
-    self.log(f"\n{bar} {title} {bar}")
 
-  def confirm(self, question: str) -> bool:
-    if self.assume_yes:
-      self.log(color(f"[auto-yes] {question}", Style.GREY))
-      return True
+# --------------------------------------------------------------------------
+# Update managers
+# --------------------------------------------------------------------------
+
+_HELP_CACHE: dict[str, str] = {}
+
+
+def _help_text(cmd: str) -> str:
+    """Best-effort `cmd --help` output for feature detection."""
+    if cmd in _HELP_CACHE:
+        return _HELP_CACHE[cmd]
     try:
-      reply = input(f"{question} [y/N]: ").strip().lower()
-    except EOFError:
-      return False
-    return reply in ("y", "yes")
-
-  def run(self, cmd: List[str], sudo: bool = False, allow_fail: bool = False) -> int:
-    cmd_str = " ".join(cmd)
-    if sudo:
-      cmd = ["sudo"] + cmd
-      cmd_str = "sudo " + cmd_str
-
-    if self.dry_run:
-      self.log(color(f"[DRY-RUN] + {cmd_str}", Style.GREY))
-      return 0
-
-    self.log(color(f"+ {cmd_str}", Style.GREY))
-    try:
-      result = subprocess.run(
-          cmd,
-          check=not allow_fail,
-          text=True,
-      )
-      return result.returncode
-    except subprocess.CalledProcessError as e:
-      self.log(color(f"Command failed with exit code {e.returncode}: {cmd_str}", Style.RED))
-      if allow_fail:
-        return e.returncode
-      raise
-    except FileNotFoundError:
-      self.log(color(f"Command not found: {cmd[0]}", Style.RED))
-      if allow_fail:
-        return 127
-      raise
+        proc = subprocess.run(
+            [cmd, "--help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        out = proc.stdout or ""
+    except Exception:
+        out = ""
+    _HELP_CACHE[cmd] = out
+    return out
 
 
-def have_cmd(name: str) -> bool:
-  return subprocess.call(
-      ["which", name],
-      stdout=subprocess.DEVNULL,
-      stderr=subprocess.DEVNULL,
-  ) == 0
+def _maybe_add_flag(args: list[str], cmd: str, flag: str, value: str | None = None) -> None:
+    ht = _help_text(cmd)
+    if not ht or flag not in ht:
+        return
+    args.append(flag)
+    if value is not None:
+        args.append(value)
 
 
-# -------- Update functions -------- #
+def update_system(ctx: Ctx):
+    ctx.banner("System packages")
 
-def update_system(ctx: Ctx) -> None:
-  ctx.banner("System packages")
+    # DietPi / Debian family
+    if have("apt-get"):
+        if ctx.confirm("Run apt-get update && apt-get upgrade?"):
+            ctx.run(["apt-get", "update"], sudo=True)
+            ctx.run(["apt-get", "upgrade", "-y"], sudo=True)
+            ctx.run(["apt-get", "autoremove", "-y"], sudo=True, allow_fail=True)
+            ctx.run(["apt-get", "autoclean", "-y"], sudo=True, allow_fail=True)
+        else:
+            ctx.log("Skipped apt-get")
 
-  # Debian / DietPi
-  if have_cmd("apt-get"):
-    if ctx.confirm("Run apt-get update && apt-get upgrade?"):
-      ctx.run(["apt-get", "update"], sudo=True)
-      ctx.run(["apt-get", "upgrade", "-y"], sudo=True)
-      ctx.run(["apt-get", "autoremove", "-y"], sudo=True, allow_fail=True)
-      ctx.run(["apt-get", "autoclean", "-y"], sudo=True, allow_fail=True)
+    # Arch pacman
+    if have("pacman"):
+        args = ["pacman", "-Syu"]
+        if ctx.assume_yes:
+            args.append("--noconfirm")
+        if ctx.confirm("Run pacman -Syu?"):
+            ctx.run(args, sudo=True)
+        else:
+            ctx.log("Skipped pacman")
+
+    # yay
+    aur_helper = None
+    for helper in ("yay", "paru"):
+        if have(helper):
+            aur_helper = helper
+            break
+
+    if aur_helper:
+        args = [aur_helper, "-Syu", "--needed"]
+        if ctx.assume_yes:
+            args.append("--noconfirm")
+            # Reduce "menu" prompts that can break unattended runs.
+            _maybe_add_flag(args, aur_helper, "--answerdiff", "None")
+            _maybe_add_flag(args, aur_helper, "--answerclean", "None")
+            _maybe_add_flag(args, aur_helper, "--sudoloop")
+
+        if ctx.confirm(f"Run {aur_helper} -Syu?"):
+            # AUR helpers can fail for transient reasons; don't abort the whole run.
+            ctx.run(args, allow_fail=True)
+        else:
+            ctx.log(f"Skipped {aur_helper}")
+
+
+def update_flatpak(ctx: Ctx):
+    ctx.banner("Flatpak")
+    if not have("flatpak"):
+        ctx.log("flatpak not installed")
+        return
+    if ctx.confirm("Run flatpak update?"):
+        args = ["flatpak", "update"]
+        if ctx.assume_yes:
+            args.append("-y")
+        ctx.run(args, allow_fail=True)
     else:
-      ctx.log("Skipped apt-get")
-
-  # Arch / pacman
-  if have_cmd("pacman"):
-    pac_args = ["pacman", "-Syu"]
-    if ctx.assume_yes:
-      pac_args.append("--noconfirm")
-    if ctx.confirm(f"Run {' '.join(['sudo'] + pac_args)}?"):
-      ctx.run(pac_args, sudo=True)
-    else:
-      ctx.log("Skipped pacman")
-
-  # yay
-  if have_cmd("yay"):
-    yay_args = ["yay", "-Syu"]
-    if ctx.assume_yes:
-      yay_args.append("--noconfirm")
-    if ctx.confirm(f"Run {' '.join(yay_args)}?"):
-      ctx.run(yay_args)
-    else:
-      ctx.log("Skipped yay")
-
-  # paru
-  if have_cmd("paru"):
-    paru_args = ["paru", "-Syu"]
-    if ctx.assume_yes:
-      paru_args.append("--noconfirm")
-    if ctx.confirm(f"Run {' '.join(paru_args)}?"):
-      ctx.run(paru_args)
-    else:
-      ctx.log("Skipped paru")
+        ctx.log("Skipped flatpak")
 
 
-def update_flatpak(ctx: Ctx) -> None:
-  ctx.banner("Flatpak")
-  if not have_cmd("flatpak"):
-    ctx.log("flatpak not installed")
-    return
-  if ctx.confirm("Run flatpak update?"):
-    args = ["flatpak", "update"]
-    if ctx.assume_yes:
-      args.append("-y")
-    ctx.run(args, allow_fail=True)
-  else:
-    ctx.log("Skipped flatpak")
+def update_languages(ctx: Ctx):
+    ctx.banner("Language & dev package managers")
 
+    # pipx
+    if have("pipx") and ctx.confirm("pipx upgrade --all?"):
+        ctx.run(["pipx", "upgrade", "--all"], allow_fail=True)
+    elif have("pipx"):
+        ctx.log("Skipped pipx")
 
-def update_snap(ctx: Ctx) -> None:
-  ctx.banner("Snap")
-  if not have_cmd("snap"):
-    ctx.log("snap not installed")
-    return
-  if ctx.confirm("Run snap refresh?"):
-    ctx.run(["snap", "refresh"], sudo=True, allow_fail=True)
-  else:
-    ctx.log("Skipped snap")
+    # pip user
+    if ctx.confirm("Upgrade user pip packages?"):
+        python_bin = sys.executable
+        snippet = textwrap.dedent("""
+            import subprocess, sys, json
 
-
-def update_brew(ctx: Ctx) -> None:
-  ctx.banner("Homebrew")
-  if not have_cmd("brew"):
-    ctx.log("brew not installed")
-    return
-  if ctx.confirm("Run brew update/upgrade/cleanup?"):
-    ctx.run(["brew", "update"], allow_fail=True)
-    ctx.run(["brew", "upgrade"], allow_fail=True)
-    ctx.run(["brew", "cleanup", "-s"], allow_fail=True)
-  else:
-    ctx.log("Skipped brew")
-
-
-def update_nix(ctx: Ctx) -> None:
-  ctx.banner("Nix")
-  if not have_cmd("nix"):
-    ctx.log("nix not installed")
-    return
-  if not ctx.confirm("Update Nix profile?"):
-    ctx.log("Skipped nix")
-    return
-  if have_cmd("nix"):
-    ctx.run(["nix", "profile", "upgrade", "--all"], allow_fail=True)
-  if have_cmd("nix-channel"):
-    ctx.run(["nix-channel", "--update"], allow_fail=True)
-  if have_cmd("nix-env"):
-    ctx.run(["nix-env", "-u"], allow_fail=True)
-
-
-def update_languages(ctx: Ctx) -> None:
-  ctx.banner("Language & dev package managers")
-
-  # pipx
-  if have_cmd("pipx") and ctx.confirm("pipx upgrade --all?"):
-    ctx.run(["pipx", "upgrade", "--all"], allow_fail=True)
-  elif have_cmd("pipx"):
-    ctx.log("Skipped pipx")
-
-  # pip (user)
-  python_bin = sys.executable or "python3"
-  if ctx.confirm("Upgrade user pip packages (pip --user)?"):
-    script = textwrap.dedent(
-        """
-        import subprocess, sys, json
-
-        exe = sys.executable
-        try:
-            out = subprocess.check_output(
-                [exe, "-m", "pip", "list", "--user", "--outdated", "--format", "json"],
-                text=True,
-            )
-        except Exception:
-            sys.exit(0)
-
-        try:
-            outdated = json.loads(out)
-        except Exception:
-            outdated = []
-
-        for pkg in outdated:
-            name = pkg.get("name")
-            if not name:
-                continue
-            print(f"[pip] upgrading {name}...")
+            exe = sys.executable
             try:
-                subprocess.check_call([exe, "-m", "pip", "install", "--user", "--upgrade", name])
-            except subprocess.CalledProcessError:
-                print(f"[pip] failed to upgrade {name}")
-        """
-    )
-    if ctx.dry_run:
-      ctx.log(color("[DRY-RUN] Would run Python pip-upgrade snippet", Style.GREY))
+                out = subprocess.check_output(
+                    [exe, "-m", "pip", "list", "--user", "--outdated", "--format", "json"],
+                    text=True,
+                )
+            except Exception:
+                sys.exit(0)
+
+            try:
+                items = json.loads(out)
+            except Exception:
+                items = []
+
+            for pkg in items:
+                name = pkg["name"]
+                print(f"[pip] upgrading {name}...")
+                try:
+                    subprocess.check_call([exe, "-m", "pip", "install", "--user", "--upgrade", name])
+                except subprocess.CalledProcessError:
+                    print(f"[pip] failed to upgrade {name}")
+        """)
+        if ctx.dry_run:
+            ctx.log(style("[DRY-RUN] Would upgrade pip packages", C.GREY))
+        else:
+            ctx.log("[pip] checking user packages...")
+            ctx.run([python_bin, "-c", snippet], allow_fail=True)
     else:
-      ctx.log("[pip] checking for outdated user packages...")
-      ctx.run([python_bin, "-c", script], allow_fail=True)
-  else:
-    ctx.log("Skipped pip user upgrades")
+        ctx.log("Skipped pip user")
 
-  # npm global
-  if have_cmd("npm") and ctx.confirm("npm -g update?"):
-    ctx.run(["npm", "-g", "update"], allow_fail=True)
-  elif have_cmd("npm"):
-    ctx.log("Skipped npm")
+    # npm global
+    if have("npm") and ctx.confirm("npm -g update?"):
+        ctx.run(["npm", "-g", "update"], sudo=ctx.run_npm_sudo, allow_fail=True)
+    elif have("npm"):
+        ctx.log("Skipped npm")
 
-  # cargo
-  if have_cmd("cargo"):
-    if have_cmd("cargo-install-update") and ctx.confirm("cargo install-update -a?"):
-      ctx.run(["cargo", "install-update", "-a"], allow_fail=True)
-    elif have_cmd("cargo-install-update"):
-      ctx.log("Skipped cargo-install-update")
+    # cargo
+    if have("cargo-install-update") and ctx.confirm("cargo install-update -a?"):
+        ctx.run(["cargo", "install-update", "-a"], allow_fail=True)
+    elif have("cargo"):
+        ctx.log("Skipped cargo or cargo-install-update missing")
+
+    # gem
+    if have("gem") and ctx.confirm("gem update user?"):
+        ctx.run(["gem", "update", "--user-install"], allow_fail=True)
+    elif have("gem"):
+        ctx.log("Skipped gem")
+
+
+def update_containers(ctx: Ctx):
+    ctx.banner("Containers")
+    if not have("docker"):
+        ctx.log("docker not installed")
+        return
+    if ctx.confirm("Pull images for running containers?"):
+        ctx.run(["bash", "-c", "docker ps --format '{{.Image}}' | xargs -r -n1 docker pull"], allow_fail=True)
+        ctx.log("Hint: restart containers manually if needed.")
     else:
-      ctx.log("cargo-install-update not installed; skipping cargo updates")
-
-  # gem
-  if have_cmd("gem") and ctx.confirm("gem update (user)?"):
-    ctx.run(["gem", "update", "--user-install"], allow_fail=True)
-  elif have_cmd("gem"):
-    ctx.log("Skipped gem")
+        ctx.log("Skipped docker image pulls")
 
 
-def update_containers(ctx: Ctx) -> None:
-  ctx.banner("Containers")
-  if not have_cmd("docker"):
-    ctx.log("docker not installed")
-    return
-  if not ctx.confirm("Pull newer images for running Docker containers?"):
-    ctx.log("Skipped docker pulls")
-    return
-  cmd = ["bash", "-c", "docker ps --format '{{.Image}}' | xargs -r -n1 docker pull"]
-  ctx.run(cmd, allow_fail=True)
-  ctx.log("Hint: restart containers manually if necessary.")
+# --------------------------------------------------------------------------
+# Cleanup
+# --------------------------------------------------------------------------
+
+def cleanup(ctx: Ctx):
+    ctx.banner("Cleanup (caches & misc)")
+
+    # pacman cache
+    if have("pacman"):
+        if have("paccache"):
+            ctx.run(["paccache", "-rk0"], sudo=True, allow_fail=True)
+            ctx.run(["paccache", "-ruk0"], sudo=True, allow_fail=True)
+        else:
+            ctx.run(["pacman", "-Scc", "--noconfirm"], sudo=True, allow_fail=True)
+
+        # Clean any leftover .part files in /var/cache/pacman/pkg
+        pkg_dir = Path("/var/cache/pacman/pkg")
+        if pkg_dir.is_dir():
+            for f in pkg_dir.glob("*.part"):
+                if ctx.dry_run:
+                    ctx.log(style(f"[DRY-RUN] Would remove {f}", C.GREY))
+                else:
+                    try:
+                        ctx.log(style(f"Removing stray pacman partial: {f}", C.GREY))
+                        f.unlink()
+                    except Exception as e:
+                        ctx.log(style(f"Failed to remove {f}: {e}", C.RED))
+
+        # Optional orphan removal
+        if ctx.remove_orphans:
+            remove_orphans(ctx)
+
+    # AUR caches
+    for x in ["yay", "paru", "pikaur"]:
+        p = Path.home() / ".cache" / x
+        if p.exists():
+            ctx.run(["rm", "-rf", str(p)], allow_fail=True)
+
+    # flatpak unused
+    if have("flatpak"):
+        ctx.run(["flatpak", "uninstall", "--unused", "-y"], allow_fail=True)
+
+    # npm cache
+    if have("npm"):
+        ctx.run(["npm", "cache", "clean", "--force"], allow_fail=True)
+
+    # pip cache
+    ctx.run([sys.executable, "-m", "pip", "cache", "purge"], allow_fail=True)
+    # Extra pip cache cleanup
+    pip_cache = Path.home() / ".cache" / "pip"
+    for sub in ("http", "selfcheck"):
+        p = pip_cache / sub
+        if p.exists():
+            ctx.run(["rm", "-rf", str(p)], allow_fail=True)
 
 
-# -------- Cleanup functions -------- #
+def cleanup_deep(ctx: Ctx):
+    ctx.banner("Deep Cleanup")
 
-def cleanup_caches(ctx: Ctx) -> None:
-  ctx.banner("Cleanup (caches)")
+    # docker prune
+    if have("docker"):
+        ctx.run(["docker", "system", "prune", "-af", "--volumes"], allow_fail=True)
 
-  # pacman cache
-  if have_cmd("pacman"):
-    if have_cmd("paccache"):
-      ctx.run(["paccache", "-rk0"], sudo=True, allow_fail=True)
-      ctx.run(["paccache", "-ruk0"], sudo=True, allow_fail=True)
-    else:
-      ctx.run(["pacman", "-Scc", "--noconfirm"], sudo=True, allow_fail=True)
+    # journalctl vacuum (time + size)
+    if have("journalctl"):
+        keep_time = os.environ.get("CLEAN_JOURNAL_FOR", "7d")   # e.g. "7d"
+        keep_size = os.environ.get("CLEAN_JOURNAL_SIZE", "200M")  # e.g. "200M"
 
-  # yay/paru/pikaur caches
-  for path in [
-      Path.home() / ".cache" / "yay",
-      Path.home() / ".cache" / "paru",
-      Path.home() / ".cache" / "pikaur",
-  ]:
-    if path.exists():
-      ctx.run(["rm", "-rf", str(path)], allow_fail=True)
+        ctx.log(style(f"Vacuuming journal to {keep_time} and {keep_size}", C.GREY))
+        ctx.run(["journalctl", f"--vacuum-time={keep_time}"], sudo=True, allow_fail=True)
+        ctx.run(["journalctl", f"--vacuum-size={keep_size}"], sudo=True, allow_fail=True)
 
-  # flatpak unused
-  if have_cmd("flatpak"):
-    ctx.run(["flatpak", "uninstall", "--unused", "-y"], allow_fail=True)
+    # go mod cache
+    if have("go"):
+        ctx.run(["go", "clean", "-modcache"], allow_fail=True)
 
-  # npm cache
-  if have_cmd("npm"):
-    ctx.run(["npm", "cache", "clean", "--force"], allow_fail=True)
+    # yarn cache
+    if have("yarn"):
+        ctx.run(["yarn", "cache", "clean"], allow_fail=True)
 
-  # pip cache
-  ctx.run([sys.executable or "python3", "-m", "pip", "cache", "purge"], allow_fail=True)
+    # cargo-cache
+    if have("cargo-cache"):
+        ctx.run(["cargo", "cache", "-a"], allow_fail=True)
 
+    # Flatpak repair (deeper cleanup)
+    if have("flatpak"):
+        ctx.run(["flatpak", "repair", "-y"], allow_fail=True)
 
-def cleanup_deep(ctx: Ctx) -> None:
-  ctx.banner("Deep Cleanup")
-
-  # docker prune
-  if have_cmd("docker"):
-    ctx.run(["docker", "system", "prune", "-af", "--volumes"], allow_fail=True)
-
-  # journalctl vacuum
-  journal_for = os.environ.get("CLEAN_JOURNAL_FOR", "7d")
-  if have_cmd("journalctl"):
-    # Try time first, then size
-    if ctx.run(["journalctl", f"--vacuum-time={journal_for}"], sudo=True, allow_fail=True) != 0:
-      ctx.run(["journalctl", f"--vacuum-size={journal_for}"], sudo=True, allow_fail=True)
-
-  # go module cache
-  if have_cmd("go"):
-    ctx.run(["go", "clean", "-modcache"], allow_fail=True)
-
-  # yarn cache
-  if have_cmd("yarn"):
-    ctx.run(["yarn", "cache", "clean"], allow_fail=True)
-
-  # cargo cache via cargo-cache
-  if have_cmd("cargo-cache"):
-    ctx.run(["cargo", "cache", "-a"], allow_fail=True)
+    # Aggressive ~/.cache cleanup (except some whitelisted apps)
+    if ctx.aggressive_cache:
+        ctx.banner("Aggressive ~/.cache cleanup")
+        base = Path.home() / ".cache"
+        keep = {"qutebrowser", "mozilla", "chromium"}
+        if base.is_dir():
+            for child in base.iterdir():
+                if child.name in keep:
+                    ctx.log(style(f"Keeping cache: {child}", C.GREY))
+                    continue
+                ctx.run(["rm", "-rf", str(child)], allow_fail=True)
 
 
-# -------- HTTP helper (stdlib) -------- #
+def remove_orphans(ctx: Ctx):
+    """Remove Arch orphans if any."""
+    if not have("pacman"):
+        return
 
-def http_post_json(url: str, payload: Dict, timeout: float = 10.0) -> Optional[Dict]:
-  import urllib.request
-  import urllib.error
+    ctx.banner("Orphaned packages (pacman -Qtdq)")
 
-  data = json.dumps(payload).encode("utf-8")
-  req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-  try:
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-      text = resp.read().decode("utf-8", errors="ignore")
-      return json.loads(text)
-  except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
-    return None
-
-
-# -------- LLM summarization -------- #
-
-def tail_log_bytes(path: Path, num_bytes: int = 12000) -> str:
-  try:
-    with path.open("rb") as f:
-      f.seek(0, 2)
-      size = f.tell()
-      if size <= num_bytes:
-        f.seek(0)
-        chunk = f.read()
-      else:
-        f.seek(-num_bytes, 2)
-        chunk = f.read()
-    return chunk.decode("utf-8", errors="ignore")
-  except Exception:
     try:
-      return path.read_text(encoding="utf-8", errors="ignore")
+        proc = subprocess.run(
+            ["pacman", "-Qtdq"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception as e:
+        ctx.log(style(f"Failed to run pacman -Qtdq: {e}", C.RED))
+        return
+
+    output = proc.stdout.strip()
+    if not output:
+        ctx.log("No orphaned packages found.")
+        return
+
+    pkgs = [line.strip() for line in output.splitlines() if line.strip()]
+    if not pkgs:
+        ctx.log("No orphaned packages found.")
+        return
+
+    ctx.log(style(f"Found {len(pkgs)} orphan(s): {' '.join(pkgs)}", C.YEL))
+
+    if not ctx.confirm(f"Remove these {len(pkgs)} orphans with pacman -Rns?"):
+        ctx.log("Skipped orphan removal.")
+        return
+
+    cmd = ["pacman", "-Rns"]
+    if ctx.assume_yes:
+        cmd.append("--noconfirm")
+    cmd.extend(pkgs)
+    ctx.run(cmd, sudo=True, allow_fail=True)
+
+
+# --------------------------------------------------------------------------
+# Codex summarizer
+# --------------------------------------------------------------------------
+
+def tail_bytes(path: Path, n: int = 20000) -> str:
+    """Return last n bytes of a file as string."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            if size <= n:
+                f.seek(0)
+            else:
+                f.seek(-n, 2)
+            data = f.read()
+        return data.decode("utf-8", errors="ignore")
     except Exception:
-      return ""
+        try:
+            return path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return ""
 
 
-def read_log_full(path: Path) -> str:
-  """Read the full log; fall back to a tail if the file cannot be fully read."""
-  try:
-    return path.read_text(encoding="utf-8", errors="ignore")
-  except Exception:
-    return tail_log_bytes(path)
+def build_summary_prompt(log_text: str) -> str | None:
+    """Construct the LLM prompt or return None if log is empty."""
+    if not log_text or not log_text.strip():
+        return None
+
+    return textwrap.dedent(f"""
+    Summarize the following system update log:
+
+    - Provide a summary overview for the log so the user has an accurate and informed
+        view of the system without being overly verbose.
+    - Following the summary overview, include a slightly more granular analysis
+    - Group key package updates by manager (pacman/yay/apt/etc)
+    - Surface warnings and errors
+    - Recommend follow-up actions
+    - Note if any user action appears to be needed
+    - Include a specific interesting detail or point out something easy to miss
+
+    BEGIN LOG
+    {log_text}
+    END LOG
+    """)
 
 
-def summarize_with_llm(ctx: Ctx, enabled: bool) -> None:
-  if not enabled:
-    ctx.log("LLM summarization disabled (--no-llm).")
-    return
+def summarize_with_openai(ctx: Ctx, llm_enabled: bool) -> bool:
+    if not llm_enabled:
+        ctx.log("LLM summarization disabled (--no-llm).")
+        return False
 
-  if ctx.dry_run:
-    ctx.log("[DRY-RUN] Would summarize log via LLM chain.")
-    return
+    ctx.banner("LLM Summary (OpenAI)")
 
-  if not ctx.log_file.exists() or ctx.log_file.stat().st_size == 0:
-    ctx.log("No log content to summarize.")
-    return
+    if ctx.dry_run:
+        ctx.log("[DRY-RUN] Would summarize via OpenAI API")
+        return True
 
-  ctx.banner("LLM Summary")
+    prompt = build_summary_prompt(tail_bytes(ctx.log_file))
+    if prompt is None:
+        ctx.log("No log content to summarize.")
+        return False
 
-  log_snippet = read_log_full(ctx.log_file)
-
-  prompt = textwrap.dedent(
-      """\
-      You are a meticulous system maintenance assistant. Create a concise but detailed summary of this full update log for a power user.
-
-      Required sections (omit only if empty):
-      - Issues: failed packages/commands, repo/key/SSL errors, prompts that were skipped, partial upgrades, pacnew/pacsave notices.
-      - Package changes (group by manager): include package -> version changes when present; call out kernel/firmware/driver updates.
-      - Services/daemons: restarts performed or needed (systemd services, containers, desktop components); include commands if implied.
-      - Follow-ups: manual steps, configs to review, rerun commands, reboots/restarts required (state why).
-      - Cleanup/disk: cache removals, prunes, notable disk usage impacts.
-
-      Use terse, technical language. Do not lose important details from the log; prefer briefly listing specifics over vague summaries.
-
-      BEGIN LOG SNIPPET
-      """
-  )
-  prompt_full = f"{prompt}\n{log_snippet}\nEND LOG SNIPPET"
-
-  summary: Optional[str] = None
-
-  # 1) LocalAI (OpenAI-compatible)
-  localai_chat_url = f"{ctx.localai_url}/v1/chat/completions"
-  ctx.log(color(f"→ Trying LocalAI at {localai_chat_url} (model={ctx.model_name})", Style.CYAN))
-  payload = {
-      "model": ctx.model_name,
-      "messages": [
-          {"role": "system", "content": "You are a helpful system maintenance assistant."},
-          {"role": "user", "content": prompt_full},
-      ],
-      "temperature": 0.2,
-  }
-  resp = http_post_json(localai_chat_url, payload, timeout=12.0)
-  if resp and "choices" in resp and resp["choices"]:
-    summary = resp["choices"][0]["message"]["content"]
-    ctx.log(color("✔ LocalAI succeeded", Style.GREEN))
-  else:
-    ctx.log(color("✘ LocalAI failed; falling back to Ollama...", Style.YELLOW))
-
-  # 2) Ollama
-  if summary is None:
-    ollama_url = f"http://{ctx.ollama_host}:{ctx.ollama_port}/api/generate"
-    ctx.log(color(f"→ Trying Ollama at {ollama_url} (model={ctx.model_name})", Style.CYAN))
-    payload = {
-        "model": ctx.model_name,
-        "prompt": prompt_full,
-        "stream": False,
-        "temperature": 0.2,
-    }
-    resp = http_post_json(ollama_url, payload, timeout=10.0)
-    if resp and "response" in resp:
-      summary = resp["response"]
-      ctx.log(color("✔ Ollama succeeded", Style.GREEN))
-    else:
-      ctx.log(color("✘ Ollama failed; trying text-generation-webui (OpenAI)...", Style.YELLOW))
-
-  # 3) text-generation-webui OpenAI-compatible
-  if summary is None:
-    tgw_url = f"http://{ctx.tgw_host}:{ctx.tgw_port}/v1/chat/completions"
-    ctx.log(color(f"→ Trying TGW OpenAI-compat at {tgw_url}", Style.CYAN))
-    payload = {
-        "model": ctx.model_name,
-        "messages": [{"role": "user", "content": prompt_full}],
-        "temperature": 0.2,
-    }
-    resp = http_post_json(tgw_url, payload, timeout=8.0)
-    if resp and "choices" in resp and resp["choices"]:
-      summary = resp["choices"][0]["message"]["content"]
-      ctx.log(color("✔ TGW OpenAI-compat succeeded", Style.GREEN))
-    else:
-      ctx.log(color("✘ TGW OpenAI-compat failed; trying TGW native...", Style.YELLOW))
-
-  # 4) text-generation-webui native /api/v1/generate
-  if summary is None:
-    tgw_native_url = f"http://{ctx.tgw_host}:{ctx.tgw_port}/api/v1/generate"
-    ctx.log(color(f"→ Trying TGW native at {tgw_native_url}", Style.CYAN))
-    payload = {
-        "prompt": prompt_full,
-        "max_new_tokens": 256,
-        "temperature": 0.2,
-        "stop": ["</s>"],
-    }
-    resp = http_post_json(tgw_native_url, payload, timeout=8.0)
-    if resp and "results" in resp and resp["results"]:
-      summary = resp["results"][0].get("text", "")
-      ctx.log(color("✔ TGW native succeeded", Style.GREEN))
-    else:
-      ctx.log(color("✘ TGW native failed; final fallback OpenAI...", Style.YELLOW))
-
-  # 5) Final fallback: OpenAI API (if key present)
-  if summary is None:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-      ctx.log("OPENAI_API_KEY not set; cannot use OpenAI fallback.")
-    else:
-      ctx.log(color("→ Trying OpenAI ChatGPT API", Style.CYAN))
-      openai_url = "https://api.openai.com/v1/chat/completions"
-      payload = {
-          "model": "gpt-4o-mini",
-          "messages": [{"role": "user", "content": prompt_full}],
-          "temperature": 0.2,
-      }
-      import urllib.request
-      import urllib.error
-      try:
+        ctx.log(style("OPENAI_API_KEY not set; skipping OpenAI summary.", C.RED))
+        return False
+
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    url = "https://api.openai.com/v1/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+    }
+
+    try:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            openai_url,
+            url,
             data=data,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
             },
         )
-        with urllib.request.urlopen(req, timeout=12.0) as resp:
-          text = resp.read().decode("utf-8", errors="ignore")
-          parsed = json.loads(text)
-          if parsed.get("choices"):
-            summary = parsed["choices"][0]["message"]["content"]
-            ctx.log(color("✔ OpenAI fallback succeeded", Style.GREEN))
-      except Exception as e:
-        ctx.log(color(f"✘ OpenAI fallback failed: {e}", Style.RED))
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            text = resp.read().decode("utf-8", errors="ignore")
+            parsed = json.loads(text)
+    except Exception as e:
+        ctx.log(style(f"OpenAI summary failed: {e}", C.RED))
+        return False
 
-  if summary:
-    ctx.summary_file.parent.mkdir(parents=True, exist_ok=True)
+    choices = parsed.get("choices") or []
+    if not choices:
+        ctx.log(style("OpenAI returned no choices.", C.RED))
+        return False
+
+    summary = (choices[0].get("message") or {}).get("content", "").strip()
+    if not summary:
+        ctx.log(style("OpenAI returned empty summary.", C.RED))
+        return False
+
     ctx.summary_file.write_text(summary, encoding="utf-8")
-    ctx.log(color(f"Summary saved to: {ctx.summary_file}", Style.GREEN))
-  else:
-    ctx.log(color("All LLM backends failed. No summary generated.", Style.RED))
+    ctx.log(style(f"Summary saved to: {ctx.summary_file}", C.GREEN))
+    return True
 
 
-# -------- Argument parsing / main -------- #
+def summarize_with_codex(ctx: Ctx, llm_enabled: bool):
+    if not llm_enabled:
+        ctx.log("LLM summarization disabled (--no-llm).")
+        return False
 
-def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-  parser = argparse.ArgumentParser(
-      description="Unified system + dev package updater with LLM log summary",
-      formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-  )
+    ctx.banner("LLM Summary (Codex)")
 
-  parser.add_argument("--system", action="store_true", help="Update system packages (pacman/apt etc.)")
-  parser.add_argument("--flatpak", action="store_true", help="Update Flatpak apps")
-  parser.add_argument("--snap", action="store_true", help="Update Snap packages")
-  parser.add_argument("--brew", action="store_true", help="Update Homebrew")
-  parser.add_argument("--nix", action="store_true", help="Update Nix profile")
-  parser.add_argument("--languages", action="store_true", help="Update language/dev package managers")
-  parser.add_argument("--containers", action="store_true", help="Update Docker images")
+    if ctx.dry_run:
+        ctx.log("[DRY-RUN] Would summarize via Codex CLI")
+        return True
 
-  parser.add_argument("--no-llm", action="store_true", help="Disable LLM summarization")
-  parser.add_argument("--model", default=os.environ.get("LLM_MODEL", "llama3.1"), help="LLM model name")
-  parser.add_argument("--dry-run", action="store_true", help="Print commands without executing them")
-  parser.add_argument("--yes", "-y", dest="assume_yes", action="store_true", help="Assume yes to all prompts")
-  parser.add_argument("--manual", dest="manual", action="store_true", help="Require confirmations")
-  parser.add_argument("--no-clean", dest="no_clean", action="store_true", help="Skip cache cleanup")
-  parser.add_argument("--deep-clean", dest="deep_clean", action="store_true", help="Perform deep cleanup")
-  parser.add_argument("--log-dir", dest="log_dir", help="Override log directory (default: ./logs)")
+    prompt = build_summary_prompt(tail_bytes(ctx.log_file))
+    if prompt is None:
+        ctx.log("No log content to summarize.")
+        return False
 
-  args = parser.parse_args(argv)
+    if not have("codex"):
+        ctx.log(style("Codex CLI not installed; skipping summary.", C.RED))
+        return False
 
-  # Default behaviors: system updates on if nothing specified
-  if not any([args.system, args.flatpak, args.snap, args.brew, args.nix, args.languages, args.containers]):
-    args.system = True
+    try:
+        proc = subprocess.run(
+            ["codex", "exec", "--json"],
+            input=prompt.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+    except Exception as e:
+        ctx.log(style(f"Codex exec failed: {e}", C.RED))
+        return False
 
-  # yes vs manual
-  if args.manual:
-    args.assume_yes = False
-  else:
-    if not args.assume_yes:
-      # default yes if neither flag used (mirror bash)
-      args.assume_yes = True
+    stdout_txt = proc.stdout.decode("utf-8", errors="ignore").strip()
+    if proc.returncode != 0:
+        ctx.log(style(f"Codex returned non-zero exit code {proc.returncode}", C.RED))
+        stderr_txt = proc.stderr.decode("utf-8", errors="ignore").strip()
+        if stderr_txt:
+            ctx.log(style(f"Codex stderr:\n{stderr_txt}", C.RED))
+        if stdout_txt:
+            ctx.log(style("Using Codex stdout as fallback summary.", C.YEL))
+            ctx.summary_file.write_text(stdout_txt, encoding="utf-8")
+            ctx.log(style(f"Summary saved to: {ctx.summary_file}", C.GREEN))
+        return False
 
-  return args
+    def parse_codex_json(raw: str):
+        """Parse Codex JSON output, tolerating event streams and extra lines."""
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+
+        responses = []
+        agent_items = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("response"):
+                responses.append(str(obj["response"]).strip())
+            item = obj.get("item") or {}
+            if isinstance(item, dict) and item.get("text"):
+                agent_items.append(str(item["text"]).strip())
+
+        if responses:
+            return {"response": responses[-1]}
+        if agent_items:
+            return {"response": agent_items[-1]}
+        return None
+
+    resp = parse_codex_json(stdout_txt)
+    if resp is None:
+        ctx.log(style("Codex JSON parse error: unable to parse response", C.RED))
+        if stdout_txt:
+            ctx.log(style("Using Codex stdout as fallback summary.", C.YEL))
+            ctx.summary_file.write_text(stdout_txt, encoding="utf-8")
+            ctx.log(style(f"Summary saved to: {ctx.summary_file}", C.GREEN))
+        return False
+
+    summary = resp.get("response", "").strip()
+    if not summary:
+        ctx.log(style("Codex returned empty summary.", C.RED))
+        if stdout_txt:
+            ctx.log(style("Using Codex stdout as fallback summary.", C.YEL))
+            ctx.summary_file.write_text(stdout_txt, encoding="utf-8")
+            ctx.log(style(f"Summary saved to: {ctx.summary_file}", C.GREEN))
+        return bool(stdout_txt.strip())
+
+    ctx.summary_file.write_text(summary, encoding="utf-8")
+    ctx.log(style(f"Summary saved to: {ctx.summary_file}", C.GREEN))
+    return True
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-  args = parse_args(argv)
+# --------------------------------------------------------------------------
+# Argument parsing / main
+# --------------------------------------------------------------------------
 
-  # Determine log directory
-  log_dir_env = os.environ.get("UPDATE_LOG_DIR")
-  if args.log_dir:
-    log_dir = Path(args.log_dir)
-  elif log_dir_env:
-    log_dir = Path(log_dir_env)
-  else:
-    log_dir = Path("logs")
-  log_dir.mkdir(parents=True, exist_ok=True)
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Unified Arch/DietPi system updater with Codex summary",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
 
-  timestamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-  log_file = log_dir / f"update-{timestamp}.log"
-  summary_file = log_dir / f"update-{timestamp}.summary.txt"
+    p.add_argument("--system", action="store_true", help="Update system packages (pacman/apt/yay/paru)")
+    p.add_argument("--flatpak", action="store_true", help="Update Flatpak apps")
+    p.add_argument("--languages", action="store_true", help="Update language/dev package managers")
+    p.add_argument("--containers", action="store_true", help="Update Docker images for running containers")
 
-  ollama_host = os.environ.get("LLM_OLLAMA_HOST", "192.168.1.69")
-  ollama_port = int(os.environ.get("LLM_OLLAMA_PORT", "11434"))
-  localai_url = os.environ.get("LLM_LOCALAI_URL", "http://localhost:8080")
-  tgw_host = os.environ.get("LLM_TGW_HOST", "192.168.1.69")
-  tgw_port = int(os.environ.get("LLM_TGW_PORT", "5150"))
+    p.add_argument("--no-llm", action="store_true", help="Disable Codex LLM summarization")
+    p.add_argument("--dry-run", action="store_true", help="Print commands without executing")
+    p.add_argument("--yes", "-y", dest="assume_yes", action="store_true", help="Assume yes to prompts")
+    p.add_argument("--manual", dest="manual", action="store_true", help="Require confirmations (disable auto-yes)")
+    p.add_argument("--no-clean", action="store_true", help="Skip cleanup steps")
+    p.add_argument("--deep-clean", action="store_true", help="Perform extended cleanup (docker prune, journal vacuum, etc.)")
 
-  ctx = Ctx(
-      dry_run=args.dry_run,
-      assume_yes=args.assume_yes,
-      log_file=log_file,
-      summary_file=summary_file,
-      model_name=args.model,
-      ollama_host=ollama_host,
-      ollama_port=ollama_port,
-      localai_url=localai_url,
-      tgw_host=tgw_host,
-      tgw_port=tgw_port,
-      clean_after=not args.no_clean,
-      deep_clean=args.deep_clean,
-  )
+    p.add_argument("--remove-orphans", action="store_true", help="Remove orphaned packages on Arch (pacman -Qtdq & -Rns)")
+    p.add_argument("--aggressive-cache", action="store_true", help="Aggressively clean ~/.cache (excluding some app caches)")
 
-  ctx.log(color("=== Unified Update Tool (Python) ===", Style.BOLD, Style.BLUE))
-  ctx.log(f"Started: {_dt.datetime.now().isoformat(timespec='seconds')}")
-  ctx.log(f"Host: {os.uname().nodename} | User: {os.environ.get('USER', 'unknown')}")
-  ctx.log(
-      f"Flags: system={args.system} flatpak={args.flatpak} snap={args.snap} "
-      f"brew={args.brew} nix={args.nix} lang={args.languages} containers={args.containers} "
-      f"dry_run={args.dry_run} yes={args.assume_yes} clean={ctx.clean_after} "
-      f"deep={ctx.deep_clean} llm={not args.no_llm} model={ctx.model_name}"
-  )
-  ctx.log(f"Log file: {log_file}")
+    p.add_argument("--log-dir", help="Override log directory (default: ./logs or $UPDATE_LOG_DIR)")
+    p.add_argument("--skip-git-repo-check", action="store_true", help="Allow running outside a Git worktree")
+    p.add_argument("--npm-sudo", action="store_true", help="Run npm -g update with sudo")
+    backend = p.add_mutually_exclusive_group()
+    backend.add_argument("--use-openai", action="store_true", help="Use OpenAI API for summaries (default)")
+    backend.add_argument("--use-codex", action="store_true", help="Use Codex CLI for summaries")
 
-  try:
-    if args.system:
-      update_system(ctx)
-    if args.flatpak:
-      update_flatpak(ctx)
-    if args.snap:
-      update_snap(ctx)
-    if args.brew:
-      update_brew(ctx)
-    if args.nix:
-      update_nix(ctx)
-    if args.languages:
-      update_languages(ctx)
-    if args.containers:
-      update_containers(ctx)
+    args = p.parse_args()
 
-    ctx.log(f"Finished updates: {_dt.datetime.now().isoformat(timespec='seconds')}")
+    # Default: if no areas selected, run a full update and cleanup
+    if not any([args.system, args.flatpak, args.languages, args.containers]):
+        args.system = True
+        args.flatpak = True
+        args.languages = True
+        args.containers = True
+        args.deep_clean = True
+        args.aggressive_cache = True
 
-    if ctx.clean_after:
-      cleanup_caches(ctx)
-      if ctx.deep_clean:
-        cleanup_deep(ctx)
+    # yes vs manual
+    if args.manual:
+        args.assume_yes = False
+    else:
+        if not args.assume_yes:
+            # default to yes if neither flag used
+            args.assume_yes = True
 
-    summarize_with_llm(ctx, enabled=not args.no_llm)
+    return args
 
-    if not args.dry_run:
-      ctx.log(color(f"Full log: {log_file}", Style.GREEN))
-      if summary_file.exists() and summary_file.stat().st_size > 0:
-        ctx.log(color(f"LLM summary: {summary_file}", Style.GREEN))
 
-    return 0
+def main():
+    args = parse_args()
 
-  except KeyboardInterrupt:
-    ctx.log(color("\nAborted by user (Ctrl+C).", Style.RED))
-    return 130
-  except Exception as e:
-    ctx.log(color(f"Unexpected error: {e}", Style.RED))
-    return 1
+    cwd = Path.cwd()
+    if not args.skip_git_repo_check and not in_git_repo(cwd):
+        print(
+            style("Error: must run inside a Git worktree or pass --skip-git-repo-check.", C.RED),
+            file=sys.stderr,
+        )
+        return 2
+
+    # log directory
+    log_dir_raw = args.log_dir or os.environ.get("UPDATE_LOG_DIR", "logs")
+    log_dir = Path(log_dir_raw).expanduser()
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_file = log_dir / f"update-{ts}.log"
+    summary_file = log_dir / f"update-{ts}.summary.txt"
+
+    llm_backend = "openai"
+    if args.use_codex:
+        llm_backend = "codex"
+    if args.use_openai:
+        llm_backend = "openai"
+
+    ctx = Ctx(
+        log_file=log_file,
+        summary_file=summary_file,
+        dry_run=args.dry_run,
+        assume_yes=args.assume_yes,
+        clean_after=not args.no_clean,
+        deep_clean=args.deep_clean,
+        remove_orphans=args.remove_orphans,
+        aggressive_cache=args.aggressive_cache,
+        run_npm_sudo=args.npm_sudo,
+        llm_backend=llm_backend,
+    )
+
+    ctx.log(style("=== Unified Arch/DietPi Update Tool ===", C.B, C.BLUE))
+    ctx.log(f"Started: {_dt.datetime.now().isoformat(timespec='seconds')}")
+    ctx.log(f"Host: {os.uname().nodename} | User: {os.environ.get('USER','unknown')}")
+    ctx.log(
+        "Flags: "
+        f"system={args.system} flatpak={args.flatpak} languages={args.languages} containers={args.containers} "
+        f"dry_run={args.dry_run} yes={args.assume_yes} clean={ctx.clean_after} deep={ctx.deep_clean} "
+        f"llm={not args.no_llm} llm_backend={ctx.llm_backend} remove_orphans={args.remove_orphans} "
+        f"aggressive_cache={args.aggressive_cache} npm_sudo={ctx.run_npm_sudo}"
+    )
+    ctx.log(f"Log file: {log_file}")
+
+    try:
+        if args.system:
+            update_system(ctx)
+        if args.flatpak:
+            update_flatpak(ctx)
+        if args.languages:
+            update_languages(ctx)
+        if args.containers:
+            update_containers(ctx)
+
+        ctx.log(f"Finished updates: {_dt.datetime.now().isoformat(timespec='seconds')}")
+
+        if ctx.clean_after:
+            cleanup(ctx)
+            if ctx.deep_clean:
+                cleanup_deep(ctx)
+
+        if not args.no_llm:
+            if ctx.llm_backend == "openai":
+                ok = summarize_with_openai(ctx, llm_enabled=True)
+                if not ok:
+                    ctx.log(style("OpenAI summary failed; trying Codex fallback.", C.YEL))
+                    summarize_with_codex(ctx, llm_enabled=True)
+            else:
+                ok = summarize_with_codex(ctx, llm_enabled=True)
+                if not ok:
+                    ctx.log(style("Codex summary failed; trying OpenAI fallback.", C.YEL))
+                    summarize_with_openai(ctx, llm_enabled=True)
+
+        if not args.dry_run:
+            ctx.log(style(f"Full log: {log_file}", C.GREEN))
+            if summary_file.exists() and summary_file.stat().st_size > 0:
+                ctx.log(style(f"LLM summary: {summary_file}", C.GREEN))
+
+        return 0
+
+    except KeyboardInterrupt:
+        ctx.log(style("Aborted by user (Ctrl+C).", C.RED))
+        return 130
+    except Exception as e:
+        ctx.log(style(f"Unexpected error: {e}", C.RED))
+        return 1
 
 
 if __name__ == "__main__":
-  raise SystemExit(main())
+    raise SystemExit(main())
