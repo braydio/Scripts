@@ -708,7 +708,7 @@ def parse_args():
     p.add_argument("--remove-orphans", action="store_true", help="Remove orphaned packages on Arch (pacman -Qtdq & -Rns)")
     p.add_argument("--aggressive-cache", action="store_true", help="Aggressively clean ~/.cache (excluding some app caches)")
 
-    p.add_argument("--log-dir", help="Override log directory (default: ./logs or $UPDATE_LOG_DIR)")
+    p.add_argument("--log-dir", help="Override log directory (default: ~/Logs or $UPDATE_LOG_DIR)")
     p.add_argument("--skip-git-repo-check", action="store_true", help="Allow running outside a Git worktree")
     p.add_argument("--npm-sudo", action="store_true", help="Run npm -g update with sudo")
     backend = p.add_mutually_exclusive_group()
@@ -749,7 +749,7 @@ def main():
         return 2
 
     # log directory
-    log_dir_raw = args.log_dir or os.environ.get("UPDATE_LOG_DIR", "logs")
+    log_dir_raw = args.log_dir or os.environ.get("UPDATE_LOG_DIR", "/home/braydenchaffee/Logs")
     log_dir = Path(log_dir_raw).expanduser()
     log_dir.mkdir(parents=True, exist_ok=True)
 
