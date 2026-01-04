@@ -163,6 +163,36 @@ def in_git_repo(path: Path) -> bool:
         return False
 
 
+def clear_log_dir(log_dir: Path, assume_yes: bool, dry_run: bool) -> None:
+    if not log_dir.exists():
+        return
+    entries = list(log_dir.iterdir())
+    if not entries:
+        print(style("Log directory already empty.", C.GREY))
+        return
+    if not assume_yes:
+        try:
+            r = input(f"Clear log files in {log_dir}? [y/N]: ").strip().lower()
+        except EOFError:
+            return
+        if r not in ("y", "yes"):
+            print(style("Log clear canceled.", C.GREY))
+            return
+
+    for child in entries:
+        if child.is_dir():
+            print(style(f"Skipping directory in log dir: {child}", C.YEL))
+            continue
+        if dry_run:
+            print(style(f"[DRY-RUN] Would remove {child}", C.GREY))
+            continue
+        try:
+            child.unlink()
+            print(style(f"Removed {child}", C.GREY))
+        except Exception as e:
+            print(style(f"Failed to remove {child}: {e}", C.RED))
+
+
 # --------------------------------------------------------------------------
 # Update managers
 # --------------------------------------------------------------------------
@@ -505,21 +535,64 @@ def build_summary_prompt(log_text: str) -> str | None:
         return None
 
     return textwrap.dedent(f"""
-    Summarize the following system update log:
+    Analyze the following system update log and produce a structured report.
 
-    - Provide a summary overview for the log so the user has an accurate and informed
-        view of the system without being overly verbose.
-    - Following the summary overview, include a slightly more granular analysis
-    - Group key package updates by manager (pacman/yay/apt/etc)
-    - Surface warnings and errors
-    - Recommend follow-up actions
-    - Note if any user action appears to be needed
-    - Include a specific interesting detail or point out something easy to miss
+    OUTPUT FORMAT (STRICT):
+    - SUMMARY_OVERVIEW: 2–3 sentences, factual, no filler.
+    - KEY_CHANGES: bullet list, grouped by manager (pacman, yay, apt, etc).
+    - WARNINGS_ERRORS: bullet list or "None".
+    - FOLLOW_UP_ACTIONS: bullet list or "None".
+    - NOTABLE_DETAIL: exactly ONE concrete observation that may be easy to miss.
+
+    RULES:
+    - Do NOT use meta phrases like "Here is", "Interesting detail", or similar.
+    - Do NOT add commentary outside the sections.
+    - Keep tone technical and neutral.
 
     BEGIN LOG
     {log_text}
     END LOG
-    """)
+    """).strip()
+
+def parse_summary_sections(text: str) -> dict[str, str]:
+    sections = {}
+    current = None
+    buf = []
+
+    for line in text.splitlines():
+        line = line.rstrip()
+        if not line:
+            continue
+
+        if ":" in line and line.split(":", 1)[0].isupper():
+            if current:
+                sections[current] = "\n".join(buf).strip()
+            current = line.split(":", 1)[0]
+            buf = [line.split(":", 1)[1].strip()]
+        else:
+            buf.append(line)
+
+    if current:
+        sections[current] = "\n".join(buf).strip()
+
+    return sections
+
+
+def select_terminal_section(sections: dict[str, str]) -> tuple[str, str]:
+    priority = [
+        "WARNINGS_ERRORS",
+        "FOLLOW_UP_ACTIONS",
+        "NOTABLE_DETAIL",
+        "SUMMARY_OVERVIEW",
+    ]
+
+    for key in priority:
+        content = sections.get(key)
+        if content and content.lower() != "none":
+            return key, content
+
+    # Fallback
+    return "SUMMARY_OVERVIEW", sections.get("SUMMARY_OVERVIEW", "")
 
 
 def summarize_with_openai(ctx: Ctx, llm_enabled: bool) -> bool:
@@ -580,6 +653,13 @@ def summarize_with_openai(ctx: Ctx, llm_enabled: bool) -> bool:
 
     ctx.summary_file.write_text(summary, encoding="utf-8")
     ctx.log(style(f"Summary saved to: {ctx.summary_file}", C.GREEN))
+
+    sections = parse_summary_sections(summary)
+    section_name, section_body = select_terminal_section(sections)
+
+    ctx.log(style(f"\n[{section_name}]", C.B, C.CYAN))
+    ctx.log(section_body)
+
     return True
 
 
@@ -709,6 +789,7 @@ def parse_args():
     p.add_argument("--aggressive-cache", action="store_true", help="Aggressively clean ~/.cache (excluding some app caches)")
 
     p.add_argument("--log-dir", help="Override log directory (default: ~/Logs or $UPDATE_LOG_DIR)")
+    p.add_argument("--clear-logs", action="store_true", help="Delete existing log files in the log directory before running")
     p.add_argument("--skip-git-repo-check", action="store_true", help="Allow running outside a Git worktree")
     p.add_argument("--npm-sudo", action="store_true", help="Run npm -g update with sudo")
     backend = p.add_mutually_exclusive_group()
@@ -752,6 +833,8 @@ def main():
     log_dir_raw = args.log_dir or os.environ.get("UPDATE_LOG_DIR", "/home/braydenchaffee/Logs")
     log_dir = Path(log_dir_raw).expanduser()
     log_dir.mkdir(parents=True, exist_ok=True)
+    if args.clear_logs:
+        clear_log_dir(log_dir, assume_yes=args.assume_yes, dry_run=args.dry_run)
 
     ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_file = log_dir / f"update-{ts}.log"
