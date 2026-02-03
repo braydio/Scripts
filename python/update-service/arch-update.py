@@ -7,6 +7,15 @@ Features:
 - Optional: AUR helpers (yay/paru), flatpak, npm, docker image pulls
 - Cleanup + deep-clean (caches, docker, journal)
 - Log capturing with OpenAI summary
+
+Fixes / improvements in this version:
+- Better default confirm/auto-yes handling (simpler, less surprising)
+- Prevent LLM “recency bias” by summarizing PER SECTION (System/AUR/npm/cleanup/etc.)
+- Increase log capture window (no more missing kernel/DKMS/initramfs details)
+- Add explicit priority rules + follow-up rules for kernel/initramfs updates
+- Make destructive actions require confirmation even when auto-yes is enabled
+- Add small sync/delay before cache cleanup to reduce “Error reading fd” races
+- Safer aggressive cache cleanup guards
 """
 
 import argparse
@@ -17,13 +26,14 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import time
 import urllib.request
 from pathlib import Path
-
 
 # --------------------------------------------------------------------------
 # ANSI colors / style
 # --------------------------------------------------------------------------
+
 
 class C:
     RESET = "\033[0m"
@@ -44,6 +54,7 @@ def style(text, *colors):
 # --------------------------------------------------------------------------
 # Context
 # --------------------------------------------------------------------------
+
 
 class Ctx:
     def __init__(
@@ -81,8 +92,11 @@ class Ctx:
         bar = "=" * 20
         self.log(f"\n{bar} {title} {bar}")
 
-    def confirm(self, question: str) -> bool:
-        if self.assume_yes:
+    def confirm(self, question: str, force: bool = False) -> bool:
+        """
+        If force=True, always prompt even in auto-yes mode.
+        """
+        if self.assume_yes and not force:
             self.log(style(f"[auto-yes] {question}", C.GREY))
             return True
         try:
@@ -138,20 +152,27 @@ class Ctx:
 # Helpers
 # --------------------------------------------------------------------------
 
+
 def have(cmd: str) -> bool:
-    return subprocess.call(
-        ["which", cmd],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    ) == 0
+    return (
+        subprocess.call(
+            ["which", cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        == 0
+    )
 
 
 def docker_image_exists_locally(image: str) -> bool:
-    return subprocess.call(
-        ["docker", "image", "inspect", image],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    ) == 0
+    return (
+        subprocess.call(
+            ["docker", "image", "inspect", image],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        == 0
+    )
 
 
 def try_pull_or_build(ctx: Ctx, image: str):
@@ -183,6 +204,7 @@ def try_pull_or_build(ctx: Ctx, image: str):
 # Update sections
 # --------------------------------------------------------------------------
 
+
 def update_system_pacman(ctx: Ctx):
     ctx.banner("System (pacman)")
 
@@ -190,6 +212,7 @@ def update_system_pacman(ctx: Ctx):
         ctx.log("pacman not installed")
         return
 
+    # Note: pacman -Syu already prompts; we provide --noconfirm for unattended.
     ctx.run(["pacman", "-Syu", "--noconfirm"], sudo=True)
 
 
@@ -252,10 +275,23 @@ def update_containers(ctx: Ctx):
 # Cleanup sections
 # --------------------------------------------------------------------------
 
+
+def _pre_cleanup_pause(ctx: Ctx):
+    """
+    Small guard to reduce cache-clean races / transient FD issues after big updates.
+    """
+    ctx.log(style("[cleanup] sync + short pause", C.GREY))
+    ctx.run(["sync"], allow_fail=True)
+    time.sleep(1)
+
+
 def cleanup_standard(ctx: Ctx):
     ctx.banner("Cleanup")
 
+    _pre_cleanup_pause(ctx)
+
     if have("pacman"):
+        # -Sc can sometimes throw transient errors after large updates; allow_fail is correct.
         ctx.run(["pacman", "-Sc", "--noconfirm"], sudo=True, allow_fail=True)
 
     if have("paccache"):
@@ -288,6 +324,11 @@ def remove_orphans(ctx: Ctx):
         ctx.log("No orphaned packages found")
         return
 
+    # Orphans removal can be impactful; require confirmation unless explicitly auto-yes.
+    if not ctx.confirm(f"Remove {len(orphans)} orphaned packages?"):
+        ctx.log("Skipping orphan removal.")
+        return
+
     cmd = ["pacman", "-Rns", "--noconfirm"] + orphans
     if ctx.dry_run:
         ctx.log(style(f"[DRY-RUN] + sudo {' '.join(cmd)}", C.GREY))
@@ -299,19 +340,40 @@ def remove_orphans(ctx: Ctx):
 def aggressive_cache_cleanup(ctx: Ctx):
     ctx.banner("Aggressive cache cleanup")
 
+    # This can be destructive; force confirmation even in auto-yes.
+    if not ctx.confirm(
+        "This will delete most of ~/.cache (except a small exclude set). Continue?",
+        force=True,
+    ):
+        ctx.log("Skipping aggressive cache cleanup.")
+        return
+
     cache_dir = Path.home() / ".cache"
     if not cache_dir.exists():
         ctx.log("~/.cache not found")
         return
 
     excludes = {"google-chrome", "chromium", "mozilla", "vivaldi", "brave"}
+
     for entry in cache_dir.iterdir():
         if entry.name in excludes:
             ctx.log(style(f"Skipping cache: {entry.name}", C.GREY))
             continue
 
+        # Safety guard: never delete something unexpected like '/' etc.
+        # (Shouldn't happen, but protects against weird path resolution.)
+        try:
+            resolved = entry.resolve()
+        except Exception:
+            ctx.log(style(f"Skipping unresolved entry: {entry}", C.YEL))
+            continue
+
+        if str(resolved) in ("/", str(Path.home()), str(cache_dir)):
+            ctx.log(style(f"Refusing to remove suspicious path: {resolved}", C.RED))
+            continue
+
         if ctx.dry_run:
-            ctx.log(style(f"[DRY-RUN] Would remove {entry}", C.GREY))
+            ctx.log(style(f"[DRY-RUN] Would remove {resolved}", C.GREY))
             continue
 
         try:
@@ -327,8 +389,15 @@ def aggressive_cache_cleanup(ctx: Ctx):
 def deep_cleanup(ctx: Ctx):
     ctx.banner("Deep clean")
 
+    # docker prune is destructive; force confirmation even with auto-yes.
     if have("docker"):
-        ctx.run(["docker", "system", "prune", "-af"], allow_fail=True)
+        if ctx.confirm(
+            "Run 'docker system prune -af' (deletes ALL unused Docker data)?",
+            force=True,
+        ):
+            ctx.run(["docker", "system", "prune", "-af"], allow_fail=True)
+        else:
+            ctx.log("Skipping docker system prune.")
 
     if have("journalctl"):
         ctx.run(["journalctl", "--vacuum-time=7d"], sudo=True, allow_fail=True)
@@ -338,7 +407,11 @@ def deep_cleanup(ctx: Ctx):
 # Summarization helpers
 # --------------------------------------------------------------------------
 
-def tail_bytes(path: Path, n: int = 20000) -> str:
+
+def read_last_bytes(path: Path, n: int = 200_000) -> str:
+    """
+    Read last N bytes of log. Larger default to avoid missing kernel/DKMS/initramfs.
+    """
     try:
         with path.open("rb") as f:
             f.seek(0, 2)
@@ -349,36 +422,139 @@ def tail_bytes(path: Path, n: int = 20000) -> str:
         return ""
 
 
-def build_summary_prompt(log_text: str) -> str | None:
-    if not log_text.strip():
+def read_first_bytes(path: Path, n: int = 120_000) -> str:
+    """
+    Read first N bytes of log, so we don't miss early kernel/initramfs details.
+    """
+    try:
+        with path.open("rb") as f:
+            return f.read(n).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def build_log_excerpt(path: Path) -> str:
+    """
+    Construct an excerpt that covers both beginning and end, to reduce
+    bias toward the tail-only (AUR-heavy) portion.
+    """
+    head = read_first_bytes(path, 140_000)
+    tail = read_last_bytes(path, 240_000)
+
+    # If log is short, avoid duplication.
+    if len(head) + 10 >= len(tail):
+        return tail
+
+    return "\n".join(
+        [
+            "===== LOG HEAD (partial) =====",
+            head,
+            "===== LOG TAIL (partial) =====",
+            tail,
+        ]
+    )
+
+
+def extract_banners_to_sections(log_text: str) -> dict[str, str]:
+    """
+    Convert our banner format into named sections.
+    Banners look like: '==================== Title ===================='
+    """
+    sections: dict[str, list[str]] = {}
+    current = "UNKNOWN"
+    sections[current] = []
+
+    for raw_line in log_text.splitlines():
+        line = raw_line.rstrip("\n")
+
+        # Match the specific banner style we emit:
+        # "\n==================== X ===================="
+        if line.startswith("====================") and line.endswith(
+            "===================="
+        ):
+            title = line.strip("= ").strip()
+            current = title if title else "UNKNOWN"
+            sections.setdefault(current, [])
+            continue
+
+        sections.setdefault(current, []).append(line)
+
+    # Join + trim
+    out: dict[str, str] = {}
+    for k, v in sections.items():
+        text = "\n".join(v).strip()
+        if text:
+            out[k] = text
+    return out
+
+
+def build_summary_prompt_from_sections(sections: dict[str, str]) -> str | None:
+    if not sections:
+        return None
+
+    # Order matters: prioritize system-critical stuff first to fight recency bias.
+    preferred_order = [
+        "System (pacman)",
+        "AUR helpers",
+        "Flatpak",
+        "npm",
+        "Containers",
+        "Cleanup",
+        "Orphan packages",
+        "Aggressive cache cleanup",
+        "Deep clean",
+        "UNKNOWN",
+    ]
+
+    parts = []
+    for name in preferred_order:
+        body = sections.get(name)
+        if body:
+            parts.append(f"{name}:\n{body}\n")
+
+    # Add anything else (in case new sections are introduced later).
+    for name, body in sections.items():
+        if name not in preferred_order:
+            parts.append(f"{name}:\n{body}\n")
+
+    excerpt = "\n".join(parts).strip()
+    if not excerpt:
         return None
 
     return textwrap.dedent(f"""
-    Analyze the following system update log and produce a structured report.
+    Analyze the following unified system update log and produce a structured report.
 
     OUTPUT FORMAT (STRICT):
     SUMMARY_OVERVIEW:
     2–3 factual sentences.
 
     KEY_CHANGES:
-    - Bullet list grouped by manager.
+    - Bullet list grouped by manager/section (e.g., System (pacman), AUR, npm, docker, cleanup).
+    - Must mention kernel/DKMS/initramfs changes if present.
 
     WARNINGS_ERRORS:
     - Bullet list or "None".
+    - Must include mkinitcpio firmware warnings and any cleanup errors if present.
 
     FOLLOW_UP_ACTIONS:
     - Bullet list or "None".
+    - If kernel or initramfs was updated/rebuilt, include "Reboot recommended" (or equivalent).
 
     NOTABLE_DETAIL:
-    - Exactly one concrete observation.
+    - Exactly one concrete observation (numbers preferred: counts, sizes, reclaimed space, etc.)
+
+    PRIORITY RULES:
+    - System (pacman) kernel/DKMS/initramfs > AUR builds > cleanup errors > npm/docker > everything else.
+    - Do not ignore earlier sections.
 
     RULES:
     - No filler or meta commentary.
     - No extra sections.
+    - Be factual; do not speculate.
 
-    BEGIN LOG
-    {log_text}
-    END LOG
+    BEGIN SECTIONS
+    {excerpt}
+    END SECTIONS
     """).strip()
 
 
@@ -406,7 +582,12 @@ def parse_summary_sections(text: str) -> dict[str, str]:
 
 
 def select_terminal_section(sections: dict[str, str]) -> tuple[str, str]:
-    for key in ("WARNINGS_ERRORS", "FOLLOW_UP_ACTIONS", "NOTABLE_DETAIL", "SUMMARY_OVERVIEW"):
+    for key in (
+        "WARNINGS_ERRORS",
+        "FOLLOW_UP_ACTIONS",
+        "NOTABLE_DETAIL",
+        "SUMMARY_OVERVIEW",
+    ):
         body = sections.get(key)
         if body and body.lower() != "none":
             return key, body
@@ -420,9 +601,45 @@ def summarize_with_openai(ctx: Ctx) -> bool:
         ctx.log("[DRY-RUN] Would summarize log with OpenAI")
         return True
 
-    prompt = build_summary_prompt(tail_bytes(ctx.log_file))
+    # Build excerpt that covers BOTH head+tail, then split into banner sections.
+    excerpt_text = build_log_excerpt(ctx.log_file)
+    if not excerpt_text.strip():
+        try:
+            size = ctx.log_file.stat().st_size
+        except Exception as e:
+            ctx.log(
+                style(
+                    f"Log file unreadable: {ctx.log_file} ({e})",
+                    C.RED,
+                )
+            )
+            return False
+
+        if size > 0:
+            try:
+                excerpt_text = ctx.log_file.read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+            except Exception as e:
+                ctx.log(
+                    style(
+                        f"Failed to read log file: {ctx.log_file} ({e})",
+                        C.RED,
+                    )
+                )
+                return False
+
+        if not excerpt_text.strip():
+            ctx.log(
+                f"No log content to summarize (file: {ctx.log_file}, size: {size} bytes)."
+            )
+            return False
+
+    banner_sections = extract_banners_to_sections(excerpt_text)
+    prompt = build_summary_prompt_from_sections(banner_sections)
     if not prompt:
-        ctx.log("No log content to summarize.")
+        ctx.log("No usable sections to summarize.")
         return False
 
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -430,7 +647,8 @@ def summarize_with_openai(ctx: Ctx) -> bool:
         ctx.log(style("OPENAI_API_KEY not set.", C.RED))
         return False
 
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    # Better default for analysis; override with OPENAI_MODEL if you want.
+    model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 
     payload = {
         "model": model,
@@ -447,7 +665,7 @@ def summarize_with_openai(ctx: Ctx) -> bool:
                 "Content-Type": "application/json",
             },
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=45) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
         ctx.log(style(f"OpenAI request failed: {e}", C.RED))
@@ -458,7 +676,7 @@ def summarize_with_openai(ctx: Ctx) -> bool:
         ctx.log(style("OpenAI returned no choices.", C.RED))
         return False
 
-    summary = choices[0]["message"]["content"].strip()
+    summary = (choices[0].get("message") or {}).get("content", "").strip()
     if not summary:
         ctx.log(style("OpenAI returned empty summary.", C.RED))
         return False
@@ -478,6 +696,7 @@ def summarize_with_openai(ctx: Ctx) -> bool:
 # Argument parsing / main
 # --------------------------------------------------------------------------
 
+
 def parse_args():
     p = argparse.ArgumentParser(
         prog="arch-update.py",
@@ -487,8 +706,7 @@ def parse_args():
             "LLM summary of the update log using the OpenAI API."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
-        epilog=textwrap.dedent(
-            """
+        epilog=textwrap.dedent("""
             BEHAVIOR NOTES:
 
               • By default, the script ASSUMES YES to prompts.
@@ -496,7 +714,7 @@ def parse_args():
 
               • If --no-llm is NOT provided, the script will:
                   - Capture the update log
-                  - Send the tail of the log to OpenAI
+                  - Send a sectioned excerpt of the log (head+tail) to OpenAI
                   - Write a structured summary to a .summary.txt file
                   - Print the most relevant section to the terminal
 
@@ -525,8 +743,7 @@ def parse_args():
 
               Include AUR, flatpak, and npm updates:
                 arch-update.py --aur --flatpak --npm
-            """
-        ),
+            """),
     )
 
     # ------------------------------------------------------------------
@@ -538,13 +755,6 @@ def parse_args():
         "--dry-run",
         action="store_true",
         help="Print commands instead of executing them (no system changes).",
-    )
-
-    core.add_argument(
-        "--yes", "-y",
-        dest="assume_yes",
-        action="store_true",
-        help="Automatically answer 'yes' to all prompts (default behavior).",
     )
 
     core.add_argument(
@@ -604,7 +814,7 @@ def parse_args():
         action="store_true",
         help=(
             "Perform deeper cleanup:\n"
-            "  - docker system prune\n"
+            "  - docker system prune (with forced confirmation)\n"
             "  - journalctl vacuum\n"
         ),
     )
@@ -618,11 +828,11 @@ def parse_args():
     clean.add_argument(
         "--aggressive-cache",
         action="store_true",
-        help="Aggressively delete ~/.cache contents (except browser caches).",
+        help="Aggressively delete ~/.cache contents (except browser caches; forced confirmation).",
     )
 
     # ------------------------------------------------------------------
-    # Language / tooling quirks
+    # Tooling quirks
     # ------------------------------------------------------------------
     tools = p.add_argument_group("Tooling quirks")
 
@@ -651,11 +861,8 @@ def parse_args():
 
     args = p.parse_args()
 
-    # Manual vs auto-yes resolution
-    if args.manual:
-        args.assume_yes = False
-    elif not args.assume_yes:
-        args.assume_yes = True
+    # Default behavior: auto-yes unless --manual
+    args.assume_yes = not args.manual
 
     return args
 
