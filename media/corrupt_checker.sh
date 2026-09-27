@@ -4,7 +4,7 @@
 WATCH_DIR="/mnt/netstorage/Media"
 LOGFILE="/mnt/netstorage/Media/healthcheck_badfiles.log"
 CORRUPT_DIR="/mnt/netstorage/Media/Corrupt"
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/1326653489711153326/u2Ez2nqOFYvyEq1xSDntw16B7VBjDWbrDdErnYtV61S_J8l5NlHUFZ6tVvxK4d-L1vuy"
+DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 SONARR_URL=http://192.168.1.85:8989
 RADARR_URL=http://192.168.1.85:7878
 API_KEY_RADARR=21d44b12bf484693a8fea99e72b0b6bc
@@ -16,8 +16,12 @@ mkdir -p "$(dirname "$LOGFILE")" "$CORRUPT_DIR"
 
 echo "=== Media Health Check: $(date) ===" >>"$LOGFILE"
 
-# Function to notify Discord
+# Function to notify Discord. Set DISCORD_WEBHOOK_URL in the environment.
 notify_discord() {
+  if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then
+    return 0
+  fi
+
   curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"$1\"}" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1
 }
 
