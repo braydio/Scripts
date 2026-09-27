@@ -10,6 +10,7 @@ SOURCE_DIRS=(
 DEST_BASE="/mnt/netstorage/Media/converted"
 MIN_SIZE_GB=20
 LOG_FILE="/mnt/netstorage/Media/converted_log.txt"
+DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
 mkdir -p "$DEST_BASE"
 
@@ -50,7 +51,9 @@ for DIR in "${SOURCE_DIRS[@]}"; do
   done
 done
 
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/1339755598157185044/us4Qb1eKXC485Bduj3zf0xYivWZbQ3RCHMDQ_yoIOEXoZfCOwJ39LXwVwxl8mb7_bdVW"
-curl -H "Content-Type: application/json" -X POST \
-  -d "{\"content\": \"✅ Re-encoded: $base ($size_gb GB)\"}" \
-  "$DISCORD_WEBHOOK_URL"
+# Optional Discord notification. Set DISCORD_WEBHOOK_URL in the environment.
+if [[ -n "$DISCORD_WEBHOOK_URL" ]]; then
+  curl -H "Content-Type: application/json" -X POST \
+    -d "{\"content\": \"✅ Re-encoded: $base ($size_gb GB)\"}" \
+    "$DISCORD_WEBHOOK_URL"
+fi
