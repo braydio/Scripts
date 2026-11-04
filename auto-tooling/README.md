@@ -20,6 +20,8 @@ Or simply refresh the page.
 
 **Note:** Applications are submitted automatically without individual approval. Only run the script if you're comfortable applying to all eligible opportunities. This is unofficial automation, so check Mercor's platform rules before using it.
 
+---
+
 # Not Too Long; Did Read
 
 ## Mercor One-Click Auto-Applier
